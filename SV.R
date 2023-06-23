@@ -727,20 +727,15 @@ SV_report <- function(SV) {
 }
 
 
+##################################
+#6/21/23
+#Using hs-blastn to improve on speed
+##################################
 find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50, max_dist=10000, blast_ref="Z:/genome/SacCer3/SacCer3_blast", masker_db=NULL, block_size=1000, exclude_chrM=T, graph=T, node=8) {
   #install.packages('rBLAST', repos = 'https://mhahsler.r-universe.dev')
   library(ShortRead)
   library(parallel)
-  #library(rBLAST)
 
-  #Please make sure blastn is in PATH. You can set the parameters with the following command
-  #dum <- Sys.info()
-  #if(dum[1] == "Windows") {
-  #  Sys.setenv(PATH=paste(Sys.which("blastn"), Sys.getenv("PATH"), sep=";"))
-  #} else if(dum[1]== "Linux") {
-  #  Sys.setenv(PATH=paste(Sys.which("blastn"), Sys.getenv("PATH"), sep=":"))
-  #}
-  #ref <- blast(blast_ref)
   fs <- FastqStreamer(FASTQ, n=block_size)
   aligned_result <- list()
   count <- 0
@@ -791,15 +786,15 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
 
 		dum <- aligned_list[[i]]
 		dum$sstrand <- apply(dum[,c("sstart", "send")], 1, function(X) ifelse(X[1]< X[2], "pos", "neg"))
-        dum$cov <- (dum$qend - dum$qstart +1)/dum$qlen
-        best <- which(dum$bitscore==max(dum$bitscore))
+    dum$cov <- (dum$qend - dum$qstart +1)/dum$qlen
+    best <- which(dum$bitscore==max(dum$bitscore))
 
-        if((max(dum$cov[best])>=0.99 & max(dum$pident[best])>=0.98) | length(unique(dum$sseqid))>2) {
-          #perfect align or too complicated align
+    if((max(dum$cov[best])>=0.99 & max(dum$pident[best])>=0.98) | length(unique(dum$sseqid))>2) {
+      #perfect align or too complicated align
 		  return(NULL)
-        }
+    }
 
-        if(length(unique(dum$sseqid))==2) {
+    if(length(unique(dum$sseqid))==2) {
 		#browser()
 		#1. Check if one chrom already covers entire read, go to following step for segmentation
 			foo <- split(dum, f=dum$sseqid)
@@ -851,7 +846,7 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
           return(NULL)
         } else if  (nrow(dum1)<=3 & length(unique(dum1$sstrand))==2) {
           dum1$SV <- "inversion"
-		  return(dum1)
+		      return(dum1)
         } else if(nrow(dum1)<=3 & length(unique(dum1$sstrand))==1) {
           temp <- convert_alignment(dum1)
           a1 <- rowSums(abs(temp)) #reference
@@ -863,16 +858,16 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
 
           if (sum(b1==0)<=min_sv_size & sum(a1>1)>=min_sv_size &sum(b1>1)<=min_sv_size) {
             dum1$SV <- "duplication"
-			return(dum1)
+			      return(dum1)
           } else if (sum(a1==0)<=min_sv_size & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
             dum1$SV <- "insertion"
-			return(dum1)
+			      return(dum1)
           } else if(sum(b1==0)<=min_sv_size & sum(b1>1) <=min_sv_size & sum(a1==0)>=min_sv_size & sum(a1>1)<=min_sv_size) {
             dum1$SV <- "deletion"
-			return(dum1)
+			      return(dum1)
           } else {
             dum1$SV <- "other"
-			return(dum1)
+			      return(dum1)
           }
 
         } else if(nrow(dum1) >3 & length(unique(dum1$sstrand))==1) {
@@ -883,14 +878,14 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
           b1 <- colSums(abs(temp))
           if (sum(b1==0)<=min_sv_size & sum(a1>2)>=min_sv_size & sum(a1==0)<=min_sv_size) {
             dum1$SV <- "tandem_repeats"
-			#print(dum1)
-			return(dum1)
+			      #print(dum1)
+			      return(dum1)
           } else if (sum(a1==0)<=min_sv_size & sum(b1>=2)>=min_sv_size) {
             #repeats in reference
             return(NULL)
           } else {
             dum1$SV <- "other"
-			return(dum1)
+			      return(dum1)
           }
         }
 		#result <- list(insertion=insertion, deletion=deletion,inversion=inversion, duplication=duplication, tandem=tandem_repeats, translocation=translocation, other=other)
@@ -907,10 +902,7 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
   saveRDS(good_result, file="temp_result.rds")
   result <- do.call("rbind", lapply(good_result, function(X) do.call("rbind", X)))
   a <- split(result, f=result$SV)
-	
   result_list <- lapply(a, function(X) split(X, f=X$qseqid))
   print(sapply(result_list, length))
-  
-
-  return(result_list)
+return(result_list)
 }
