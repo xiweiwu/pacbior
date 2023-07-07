@@ -714,17 +714,154 @@ call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, window_masker_
     #generate_image(sv[["other"]], output=T)
     setwd("../../")
   }
+  result <- SV_report(SV)
+  write.csv("result_summary.csv")
   return(sv)
 }
 
 SV_report <- function(SV) {
-	for(i in names(SV)) {
-		temp <- SV[[i]]
+  result <- list()
+  count <- 0
+	temp <- SV[["deletion"]]
+	if(!is.null(temp)) {	
 		for(j in 1:length(temp)) {
-			
+		  
+		  dum <- temp[[j]]
+		  if(nrow(dum)!=2) {
+		    next
+		  }
+		  count <- count+1
+			if(unique(dum$sstrand)=="pos") {
+			  start <- dum$send[1]
+        end <- dum$sstart[2]
+		  } else {
+		    end <- dum$send[1]
+		    start <- dum$sstart[2]
+		  }
+		  seqname <- unique(dum$sseqid)
+		  read <- unique(dum$qseqid)
+		  result[[count]] <- c(seqname, start, end, read, "deletion")
 		}
 	}
+	
+	temp <- SV[["insertion"]]
+	if(!is.null(temp)) {	
+	  for(j in 1:length(temp)) {
+	    
+	    dum <- temp[[j]]
+	    if(nrow(dum)!=2) {
+	      next
+	    }
+	    count <- count+1
+	    start <- mean(as.numeric(dum$send[1]), as.numeric(dum$sstart[2]))
+      end <- start
+	    seqname <- unique(dum$sseqid)
+	    read <- unique(dum$qseqid)
+	    result[[count]] <- c(seqname, start, end, read, "insertion")
+	  }
+	}
+	
+	temp <- SV[["duplication"]]
+	if(!is.null(temp)) {	
+	  for(j in 1:length(temp)) {
+
+	    dum <- temp[[j]]
+	    if(nrow(dum)!=2) {
+	      next
+	    }
+	    count<- count+1
+	    if(unique(dum$sstrand)=="pos") {
+	      start <- dum$send[1]
+	      end <- dum$sstart[2]
+	    } else {
+	      end <- dum$send[1]
+	      start <- dum$sstart[2]
+	    }
+	    seqname <- unique(dum$sseqid)
+	    read <- unique(dum$qseqid)
+	    result[[count]] <- c(seqname, start, end, read, "duplication")
+	  }
+	}
+	
+	temp <- SV[["inversion"]]
+	if(!is.null(temp)) {	
+	  for(j in 1:length(temp)) {
+	    dum <- temp[[j]]
+	    if(nrow(dum)>3) {
+	      next
+	    } 
+	    count <- count+1
+	    if(nrow(dum)==2) {
+        ind <- which(dum$cov==min(dum$cov))[1]
+	    } else if(nrow(dum)==3) {
+	      ind <- 2
+	    }
+	    foo <- table(dum$sstrand)
+      if(names(sort(foo)[2])=="neg") {
+        start <- dum$send[ind]
+        end <- dum$sstart[ind]
+      } else {
+        end <- dum$send[ind]
+        start <- dum$sstart[ind]
+      }
+	    seqname <- unique(dum$sseqid)
+	    read <- unique(dum$qseqid)
+	    result[[count]] <- c(seqname, start, end, read, "inversion")
+	   }
+	}
+	
+	  temp <- SV[["translocation"]]
+	  if(!is.null(temp)) {	
+	    for(j in 1:length(temp)) {
+	      dum <- temp[[j]]
+	      dum_list <- split(dum, f=dum$sseqid)
+	      for(i in length(dum_list)) {
+	        dum_temp <- dum_list[[i]]
+	        if(nrow(dum_temp)==1) {
+	          dum_list[[i]] <- dum_temp
+	        } else {
+	          dum_temp[,c("sstart", "send")] <- t(apply(dum_temp[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+	          #x <- GRanges(seqnames=unique(dum_temp$sseqid), ranges = IRanges(start=dum_temp$sstart, end=dum_temp$send))
+	          cov_1 <- as.numeric(dum_temp$length)/(max(as.numeric(dum_temp$qend))-min(as.numeric(dum_temp$qstart)))
+	          if(max(cov_1)>= 0.99) {
+	            ind <- which(cov_1 == max(cov_1))
+	            dum_list[[i]] <- dum_temp[ind,]
+	          } else if (nrow(dum_temp)>2) {
+	            break
+	          } else {
+	            dum_list[[i]] <- dum_temp[1,]
+	          }
+	        }
+	      }
+        dum <- do.call("rbind", dum_list)
+        dum <- dum[order(dum$qstart),]
+        if(nrow(dum)!=2) {
+          next
+        } else {
+          count<- count+1
+          if(dum$sstrand[1]=="pos") {
+            start <- dum$send[1]
+          } else {
+            start <- dum$sstart[1]
+          }  
+          
+          if(dum$sstrand[2]=="pos") {
+            end <- dum$sstart[2]
+          } else {
+            end <- dum$sstart[2]
+          }
+          seqname <- paste(unique(dum$sseqid), collapse="-")
+          read <- unique(dum$qseqid)
+          result[[count]] <- c(seqname, start, end, read, "translocation")
+        }
+	    }
+	  }
+	  #browser()
+	  result_table <- do.call("rbind", result)
+	  colnames(result_table) <- c("seqname", "bp_1", "bp_2", "read_id", "sv_type")
+	  return(result_table)
 }
+
 
 
 ##################################
@@ -811,7 +948,7 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
 				#one chrom covers entire read, so just use the chrom for next step and ignore the other chrom
 					dum <- foo[[which(cov_list>= 0.99)]]
 			} else {
-				#Check if fragments on both chom are contiguous and covers most of the read
+				#Check if fragments on both chrom are contiguous and covers most of the read
 				each_combined <- do.call("cbind", each_list)
 				cov_combined <- sum(apply(each_combined, 1, sum)>0)/nrow(each_combined)
 				if(cov_combined>= 0.99) {
@@ -823,9 +960,9 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
 					return(NULL)
 				}
 			}
-        }
-        #add in segmenation step to resolve multiple reports involving distant regions
-        
+    }
+    
+    #add in segmenation step to resolve multiple reports involving distant regions
 		dum_temp <- dum
 		dum_temp[,c("sstart", "send")] <- t(apply(dum_temp[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
         x <- GRanges(seqnames=unique(dum_temp$sseqid), ranges = IRanges(start=dum_temp$sstart, end=dum_temp$send))
@@ -845,8 +982,14 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
           #normal
           return(NULL)
         } else if  (nrow(dum1)<=3 & length(unique(dum1$sstrand))==2) {
-          dum1$SV <- "inversion"
-		      return(dum1)
+          temp <- convert_alignment(dum1)
+          a1 <- rowSums(abs(temp)) #reference
+          b1 <- colSums(abs(temp)) #query
+          
+          if (sum(b1==0)<=min_sv_size & sum(a1==1)<=min_sv_size & sum(a1>1)<=min_sv_size & sum(b1>1)<=min_sv_size) {
+            dum1$SV <- "inversion"
+		        return(dum1)
+          }
         } else if(nrow(dum1)<=3 & length(unique(dum1$sstrand))==1) {
           temp <- convert_alignment(dum1)
           a1 <- rowSums(abs(temp)) #reference
