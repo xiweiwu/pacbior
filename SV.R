@@ -18,7 +18,7 @@ get_candidate <- function(reads=NULL, BAM, softclip_length) {
     temp <- as.integer(X)
     temp[length(temp)]
   })>=softclip_length)]
-  #Also remove large deletion in the middle
+  #Also include large insertion in the middle
   c <- grep("I", dum)
   c1 <- gsub("[0-9]*[SDX=]", "", dum[c])
   bad3 <- c[sapply(strsplit(c1, split="I"), function(X) {
@@ -29,9 +29,22 @@ get_candidate <- function(reads=NULL, BAM, softclip_length) {
     }
     return(good)
   })]
-  bad <- unique(c(bad1, bad2, bad3))
+  
+  #Also include large deletion in the middle
+  d <- grep("D", dum)
+  d1 <- gsub("[0-9]*[SIX=]", "", dum[d])
+  bad4 <- d[sapply(strsplit(d1, split="D"), function(X) {
+    temp <- as.integer(X)
+    good <- FALSE
+    if(max(temp)>=softclip_length) {
+      good <- TRUE
+    }
+    return(good)
+  })]
   #browser()
-  print(paste("There are", length(bad), "reads with long softclips or large insertions."))
+  bad <- unique(c(bad1, bad2, bad3, bad4))
+  #browser()
+  print(paste("There are", length(bad), "reads with long softclips or large indels."))
   return(names(read)[bad])
 }
 
@@ -665,9 +678,10 @@ convert_alignment <- function(alignment, scale.down=1) {
 }
 
 
-call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, window_masker_db=NULL, block_size=1000, graph=T, node=8, out="SV_result") {
+call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 1000, window_masker_db=NULL, block_size=1000, graph=T, node=8, out="SV_result") {
+  library(rtracklayer)
   if(is.null(candidates)) {
-    candidates <- get_candidate(BAM=BAM, softclip_length = 100)
+    candidates <- get_candidate(BAM=BAM, softclip_length = 50)
     writeLines(candidates, "candidates.txt")
   } else {
     candidates=readLines(candidates)
@@ -675,7 +689,7 @@ call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, window_masker_
 
 
   start_time <- Sys.time()
-  sv <- find_sv_hs_blastn_parallel(FASTQ = fastq,  blast_ref=ref, masker_db=window_masker_db, candidates=candidates, block_size=block_size, node=node)
+  sv <- find_sv_hs_blastn_parallel(FASTQ = fastq,  blast_ref=ref, masker_db=window_masker_db, candidates=candidates,max_dist=max_dist, block_size=block_size, node=node)
   end_time <- Sys.time()
   print(paste(start_time, end_time))
   print(paste("Total run time:", end_time - start_time))
@@ -685,17 +699,22 @@ call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, window_masker_
   saveRDS(sv, file="sv_all.rds")
   
   for(i in names(sv)) {
-	write.csv(do.call("rbind", sv[[i]]), file=paste0(i, ".csv"))
+	  write.csv(do.call("rbind", sv[[i]]), file=paste0(i, ".csv"))
   }
 
+  result <- SV_report(sv)
+  write.csv(result, "result_summary.csv")
+  SV_collapsed <- Collapse_SV(result)
+  export(SV_collapsed, "SV.gtf")
+  
   if(graph) {
     system("mkdir insertion")
 	system("mkdir deletion")
 	system("mkdir inversion")
 	system("mkdir duplication")
-	system("mkdir tandem")
+	system("mkdir CSUB")
 	system("mkdir translocation")
-	#system("mkdir other")
+	system("mkdir other")
  
     print("Generating graphs...")
     setwd("insertion")
@@ -706,16 +725,15 @@ call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, window_masker_
     generate_image(sv[["inversion"]], output=T)
     setwd("../duplication")
     generate_image(sv[["duplication"]], output=T)
-    setwd("../tandem")
-    generate_image(sv[["tandem_repeats"]], output=T)
-	setwd("../translocation")
+    setwd("../CSUB")
+    generate_image(sv[["CSUB"]], output=T)
+	  setwd("../translocation")
     generate_image_translocation(sv[["translocation"]], output=T)
-    #setwd("../other")
-    #generate_image(sv[["other"]], output=T)
+    setwd("../other")
+    generate_image(sv[["other"]], output=T)
     setwd("../../")
   }
-  result <- SV_report(SV)
-  write.csv("result_summary.csv")
+
   return(sv)
 }
 
@@ -857,11 +875,25 @@ SV_report <- function(SV) {
 	    }
 	  }
 	  #browser()
-	  result_table <- do.call("rbind", result)
-	  colnames(result_table) <- c("seqname", "bp_1", "bp_2", "read_id", "sv_type")
-	  return(result_table)
+	  result <- do.call("rbind", result)
+
+	  return(result)
 }
 
+Collapse_SV <- function(result_table) {
+  #result_table <- result[result[,5]!="translocation",]
+  result_table[,2:3] <- t(apply(result_table[,2:3], 1, function(X) sort(as.numeric(X))))
+  #result_table <- rbind(result_table, result[result[,5]=="translocation",])
+  colnames(result_table) <- c("seqname", "start", "end", "read_id", "sv_type")
+  result_table <- as.data.frame(result_table)
+  result_table <- result_table[order(result_table$seqname, result_table$start),]
+  result_range <- GRanges(result_table)
+  combined <- reduce(result_range, min.gapwidth=25)
+  foo <- findOverlaps(result_range, combined)
+  combined$support_reads <- table(subjectHits(foo))
+  combined$sv_type <- result_table$sv_type[queryHits(foo)[match(sort(unique(subjectHits(foo))), as.integer(subjectHits(foo)))]]
+  return(combined)
+}
 
 
 ##################################
@@ -872,7 +904,9 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
   #install.packages('rBLAST', repos = 'https://mhahsler.r-universe.dev')
   library(ShortRead)
   library(parallel)
-
+  #browser()
+  Sys.setenv(PATH=paste("/opt/hs-blastn/0.0.5/bin/", Sys.getenv("PATH"), sep=":"))
+  
   fs <- FastqStreamer(FASTQ, n=block_size)
   aligned_result <- list()
   count <- 0
@@ -926,7 +960,7 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
     dum$cov <- (dum$qend - dum$qstart +1)/dum$qlen
     best <- which(dum$bitscore==max(dum$bitscore))
 
-    if((max(dum$cov[best])>=0.99 & max(dum$pident[best])>=0.98) | length(unique(dum$sseqid))>2) {
+    if((max(dum$cov[best])>=0.99 & max(dum$pident[best])>=97) | length(unique(dum$sseqid))>2) {
       #perfect align or too complicated align
 		  return(NULL)
     }
@@ -986,7 +1020,7 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
           a1 <- rowSums(abs(temp)) #reference
           b1 <- colSums(abs(temp)) #query
           
-          if (sum(b1==0)<=min_sv_size & sum(a1==1)<=min_sv_size & sum(a1>1)<=min_sv_size & sum(b1>1)<=min_sv_size) {
+          if (sum(b1==0)<=min_sv_size & sum(a1==0)<=min_sv_size & sum(a1>1)<=min_sv_size & sum(b1>1)<=min_sv_size) {
             dum1$SV <- "inversion"
 		        return(dum1)
           }
@@ -999,9 +1033,11 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
             return(NULL)
           }
 
-          if (sum(b1==0)<=min_sv_size & sum(a1>1)>=min_sv_size &sum(b1>1)<=min_sv_size) {
+          if (sum(a1==0)<=min_sv_size & sum(a1>1)>=min_sv_size &sum(b1>1)<=min_sv_size) {
             dum1$SV <- "duplication"
 			      return(dum1)
+          } else if (sum(a1==0)>=min_sv_size & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
+            dum1$SV <- "CSUB"
           } else if (sum(a1==0)<=min_sv_size & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
             dum1$SV <- "insertion"
 			      return(dum1)
@@ -1019,8 +1055,8 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
           a1 <- rowSums(abs(temp))
           #query
           b1 <- colSums(abs(temp))
-          if (sum(b1==0)<=min_sv_size & sum(a1>2)>=min_sv_size & sum(a1==0)<=min_sv_size) {
-            dum1$SV <- "tandem_repeats"
+          if (sum(b1>1)<=min_sv_size & sum(a1>2)>=min_sv_size & sum(a1==0)<=min_sv_size) {
+            dum1$SV <- "duplication"
 			      #print(dum1)
 			      return(dum1)
           } else if (sum(a1==0)<=min_sv_size & sum(b1>=2)>=min_sv_size) {
