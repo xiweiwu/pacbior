@@ -612,9 +612,9 @@ generate_image <- function(aligned_list, output=T) {
     }
 
     dum_filtered <- as.data.frame(aligned_list[[j]])
-	sseqid <- unique(dum_filtered$sseqid)
-	dum_filtered[,c(3:13)] <- sapply(dum_filtered[,c(3:13)], as.numeric)
-	#dum_filtered[,c(2,3,4,6,7,9:12)] <- sapply(dum_filtered[,c(2,3,4,6,7,9:12)], as.numeric)
+  	sseqid <- unique(dum_filtered$sseqid)
+  	dum_filtered[,c(3:13)] <- sapply(dum_filtered[,c(3:13)], as.numeric)
+	  #dum_filtered[,c(2,3,4,6,7,9:12)] <- sapply(dum_filtered[,c(2,3,4,6,7,9:12)], as.numeric)
     #if(length(unique(dum_filtered$sseqid))>1) {
     # print("More than one chromosome.")
     #  next
@@ -652,6 +652,7 @@ convert_alignment <- function(alignment, scale.down=1) {
       print("More than one chromosome.")
       next
     }
+    alignment[,c(3:13)] <- sapply(alignment[,c(3:13)], as.numeric)
     min_Y <- min(c(alignment$qstart, alignment$qend))
     max_Y <- max(c(alignment$qstart, alignment$qend))
     min_X <- min(c(alignment$sstart, alignment$send))
@@ -677,9 +678,35 @@ convert_alignment <- function(alignment, scale.down=1) {
   return(temp)
 }
 
+convert_alignment_new <- function(alignment, scale.down=1) {
+  
+  if(length(unique(alignment$sseqid))>1) {
+    print("More than one chromosome.")
+    next
+  }
+  alignment[,c(3:13)] <- sapply(alignment[,c(3:13)], as.numeric)
+  
+  #reference
+  foo <- alignment[,c("sseqid", "sstart", "send")]
+  foo[,c("sstart", "send")] <- t(apply(foo[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+  colnames(foo) <- c("seqname", "start", "end")
+  foo1 <- GRanges(foo)
+  a1 <- as.integer(coverage(foo1)[[1]])[-c(1:min(foo[,c("start", "end")]))]
+  
+  #query
+  foo <- alignment[,c("qseqid", "qstart", "qend")]
+  foo[,c("qstart", "qend")] <- t(apply(foo[,c("qstart", "qend")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+  colnames(foo) <- c("seqname", "start", "end")
+  foo1 <- GRanges(foo)
+  b1 <- as.integer(coverage(foo1)[[1]])
+  
+  return(list(a1, b1))
+}
 
-call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 1000, window_masker_db=NULL, block_size=1000, graph=T, node=8, out="SV_result") {
+call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 10000, window_masker_db=NULL, block_size=1000, graph=T, node=8, out="SV_result") {
   library(rtracklayer)
+  library(tictoc)
+  
   if(is.null(candidates)) {
     candidates <- get_candidate(BAM=BAM, softclip_length = 50)
     writeLines(candidates, "candidates.txt")
@@ -688,63 +715,54 @@ call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 100
   }
 
 
-  start_time <- Sys.time()
-  sv <- find_sv_hs_blastn_parallel(FASTQ = fastq,  blast_ref=ref, masker_db=window_masker_db, candidates=candidates,max_dist=max_dist, block_size=block_size, node=node)
-  end_time <- Sys.time()
-  print(paste(start_time, end_time))
-  print(paste("Total run time:", end_time - start_time))
+  #start_time <- Sys.time()
+  tic()
+  sv_result <- find_sv_hs_blastn_parallel_v2(FASTQ = fastq,  blast_ref=ref, masker_db=window_masker_db, candidates=candidates,max_dist=max_dist, block_size=block_size, node=node)
+  #end_time <- Sys.time()
+  #print(paste(start_time, end_time))
+  #print(paste("Total run time:", end_time - start_time))
+  toc()
   
   system(paste0("mkdir ", out))
   setwd(out)
-  saveRDS(sv, file="sv_all.rds")
-  
+  saveRDS(sv_result, file="sv_all.rds")
+  sv <- sv_result[[1]]
   for(i in names(sv)) {
 	  write.csv(do.call("rbind", sv[[i]]), file=paste0(i, ".csv"))
   }
 
-  result <- SV_report(sv)
-  write.csv(result, "result_summary.csv")
-  SV_collapsed <- Collapse_SV(result)
-  export(SV_collapsed, "SV.gtf")
+  report <- sv_result[[2]]
+  write.csv(report, "sv_report_all.csv")
+  SV_collapsed <- Collapse_SV_v2(report)
+  write.csv(SV_collapsed, "SV_report_summary.csv")
   
   if(graph) {
-    system("mkdir insertion")
-	system("mkdir deletion")
-	system("mkdir inversion")
-	system("mkdir duplication")
-	system("mkdir CSUB")
-	system("mkdir translocation")
-	system("mkdir other")
- 
     print("Generating graphs...")
-    setwd("insertion")
-    generate_image(sv$insertion, output=T)
-    setwd("../deletion")
-    generate_image(sv$deletion, output=T)
-    setwd("../inversion")
-    generate_image(sv[["inversion"]], output=T)
-    setwd("../duplication")
-    generate_image(sv[["duplication"]], output=T)
-    setwd("../CSUB")
-    generate_image(sv[["CSUB"]], output=T)
-	  setwd("../translocation")
-    generate_image_translocation(sv[["translocation"]], output=T)
-    setwd("../other")
-    generate_image(sv[["other"]], output=T)
-    setwd("../../")
-  }
-
-  return(sv)
+    for(i in names(sv)) {
+      system(paste0("mkdir ", i))
+      setwd(i)
+      if(i=="translocation") {
+        generate_image_translocation(sv[["translocation"]], output=T)
+      } else {
+        generate_image(sv[[i]], output=T)
+      }
+      setwd("../")
+    }
+  }  
+  
+  return(sv_result)
 }
 
 SV_report <- function(SV) {
   result <- list()
   count <- 0
 	temp <- SV[["deletion"]]
-	if(!is.null(temp)) {	
+	if(!is.null(temp)) {
+	  
 		for(j in 1:length(temp)) {
 		  
 		  dum <- temp[[j]]
+		  #dum[,c("sstart", "send")] <- t(apply(dum[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
 		  if(nrow(dum)!=2) {
 		    next
 		  }
@@ -767,15 +785,39 @@ SV_report <- function(SV) {
 	  for(j in 1:length(temp)) {
 	    
 	    dum <- temp[[j]]
+	    #dum[,c("sstart", "send")] <- t(apply(dum[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
 	    if(nrow(dum)!=2) {
 	      next
 	    }
 	    count <- count+1
-	    start <- mean(as.numeric(dum$send[1]), as.numeric(dum$sstart[2]))
+	    start <- round(mean(as.numeric(dum$send[1]), as.numeric(dum$sstart[2])))
       end <- start
 	    seqname <- unique(dum$sseqid)
 	    read <- unique(dum$qseqid)
 	    result[[count]] <- c(seqname, start, end, read, "insertion")
+	  }
+	}
+	
+	temp <- SV[["CSUB"]]
+	if(!is.null(temp)) {	
+	  for(j in 1:length(temp)) {
+	    
+	    dum <- temp[[j]]
+	    dum[,c("sstart", "send")] <- t(apply(dum[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+	    if(nrow(dum)!=2) {
+	      next
+	    }
+	    count <- count+1
+	    if(unique(dum$sstrand)=="pos") {
+	      start <- dum$send[1]
+	      end <- dum$sstart[2]
+	    } else {
+	      end <- dum$send[1]
+	      start <- dum$sstart[2]
+	    }
+	    seqname <- unique(dum$sseqid)
+	    read <- unique(dum$qseqid)
+	    result[[count]] <- c(seqname, start, end, read, "CSUB")
 	  }
 	}
 	
@@ -784,17 +826,15 @@ SV_report <- function(SV) {
 	  for(j in 1:length(temp)) {
 
 	    dum <- temp[[j]]
-	    if(nrow(dum)!=2) {
-	      next
+	    dum[,c("sstart", "send")] <- t(apply(dum[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+	    if(nrow(dum)==2) {
+	      ind <- which(dum$length==min(dum$length))
+	      start <- dum$sstart[ind]
+	      end <- dum$send[ind]
 	    }
 	    count<- count+1
-	    if(unique(dum$sstrand)=="pos") {
-	      start <- dum$send[1]
-	      end <- dum$sstart[2]
-	    } else {
-	      end <- dum$send[1]
-	      start <- dum$sstart[2]
-	    }
+	    start <- dum$sstart[2]
+	    end <- dum$send[2]
 	    seqname <- unique(dum$sseqid)
 	    read <- unique(dum$qseqid)
 	    result[[count]] <- c(seqname, start, end, read, "duplication")
@@ -880,6 +920,153 @@ SV_report <- function(SV) {
 	  return(result)
 }
 
+SV_report_1 <- function(SV) {
+  result <- list()
+  count <- 0
+  temp <- SV[["deletion"]]
+  if(!is.null(temp)) {
+    
+    for(j in 1:length(temp)) {
+      
+      dum <- temp[[j]]
+      #dum[,c("sstart", "send")] <- t(apply(dum[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+      if(nrow(dum)!=2) {
+        next
+      }
+      count <- count+1
+      if(unique(dum$sstrand)=="pos") {
+        start <- dum$send[1]
+        end <- dum$sstart[2]
+      } else {
+        end <- dum$send[1]
+        start <- dum$sstart[2]
+      }
+      seqname <- unique(dum$sseqid)
+      read <- unique(dum$qseqid)
+      result[[count]] <- c(seqname, start, end, read, "deletion")
+    }
+  }
+  
+  temp <- SV[["insertion"]]
+  if(!is.null(temp)) {	
+    for(j in 1:length(temp)) {
+      
+      dum <- temp[[j]]
+      #dum[,c("sstart", "send")] <- t(apply(dum[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+      if(nrow(dum)!=2) {
+        next
+      }
+      count <- count+1
+      start <- round(mean(as.numeric(dum$send[1]), as.numeric(dum$sstart[2])))
+      end <- start
+      seqname <- unique(dum$sseqid)
+      read <- unique(dum$qseqid)
+      result[[count]] <- c(seqname, start, end, read, "insertion")
+    }
+  }
+  
+  temp <- SV[["CSUB"]]
+  if(!is.null(temp)) {	
+    for(j in 1:length(temp)) {
+      
+      dum <- temp[[j]]
+      dum[,c("sstart", "send")] <- t(apply(dum[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+      if(nrow(dum)!=2) {
+        next
+      }
+      count <- count+1
+      if(unique(dum$sstrand)=="pos") {
+        start <- dum$send[1]
+        end <- dum$sstart[2]
+      } else {
+        end <- dum$send[1]
+        start <- dum$sstart[2]
+      }
+      seqname <- unique(dum$sseqid)
+      read <- unique(dum$qseqid)
+      result[[count]] <- c(seqname, start, end, read, "CSUB")
+    }
+  }
+  
+  temp <- SV[["duplication"]]
+  if(!is.null(temp)) {	
+    for(j in 1:length(temp)) {
+      #print(j)
+      count <- count +1
+      dum <- temp[[j]]
+      dum[,c(3:13)] <- sapply(dum[,c(3:13)], as.numeric)
+      #dum[,c("sstart", "send")] <- t(apply(dum[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+      foo <- convert_alignment_new(dum)
+      a1 <- foo[[1]] #reference
+      b1 <- foo[[2]] #query
+      
+      foo1 <- range(which(a1>1))
+      start <- min(dum[,c("sstart", "send")])+foo1[1]
+      end <- min(dum[,c("sstart", "send")])+foo1[2]
+      seqname <- unique(dum$sseqid)
+      read <- unique(dum$qseqid)
+      result[[count]] <- c(seqname, start, end, read, "duplication")
+    }
+  }
+  
+  temp <- SV[["inversion"]]
+  if(!is.null(temp)) {	
+    for(j in 1:length(temp)) {
+      dum <- temp[[j]]
+      if(nrow(dum)>3) {
+        next
+      } 
+      count <- count+1
+      if(nrow(dum)==2) {
+        ind <- which(dum$cov==min(dum$cov))[1]
+      } else if(nrow(dum)==3) {
+        ind <- 2
+      }
+      #foo <- table(dum$sstrand)
+      #if(names(sort(foo)[2])=="neg") {
+      if(dum$sstrand[ind]=="pos") {
+        start <- dum$sstart[ind]
+        end <- dum$send[ind]
+      } else {
+        end <- dum$send[ind]
+        start <- dum$sstart[ind]
+      }
+      seqname <- unique(dum$sseqid)
+      read <- unique(dum$qseqid)
+      result[[count]] <- c(seqname, start, end, read, "inversion")
+    }
+  }
+  
+  temp <- SV[["translocation"]]
+  if(!is.null(temp)) {	
+    for(j in 1:length(temp)) {
+      dum <- temp[[j]]
+      #dum[,c("sstart", "send")] <- t(apply(dum[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+      dum <- dum[order(dum$sseqid),]
+      count<- count+1
+      if(dum$sstrand[1]=="pos") {
+          start <- dum$send[1]
+      } else {
+          start <- dum$sstart[1]
+      }  
+        
+      if(dum$sstrand[2]=="pos") {
+          end <- dum$sstart[2]
+      } else {
+          end <- dum$sstart[2]
+      }
+      seqname <- paste(unique(dum$sseqid), collapse="-")
+      read <- unique(dum$qseqid)
+      result[[count]] <- c(seqname, start, end, read, "translocation")
+    }
+  }
+  #browser()
+  result <- do.call("rbind", result)
+  return(result)
+}
+
+
+
 Collapse_SV <- function(result_table) {
   #result_table <- result[result[,5]!="translocation",]
   result_table[,2:3] <- t(apply(result_table[,2:3], 1, function(X) sort(as.numeric(X))))
@@ -895,6 +1082,30 @@ Collapse_SV <- function(result_table) {
   return(combined)
 }
 
+Collapse_SV_v2 <- function(result_table) {
+  #result_table <- result[result[,5]!="translocation",]
+  result_table <- as.data.frame(result_table)
+  result_table <- result_table[result_table[,5]!="translocation",] #need a separate solution for TRA
+  result_table[,2:3] <- t(apply(result_table[,2:3], 1, function(X) as.numeric(X)))
+  result_table[,3] <- result_table[,2]+result_table[,3]
+  
+  colnames(result_table) <- c("seqname", "start", "end", "read_id", "sv_type")
+  temp <- split(result_table, f=result_table$sv_type)
+  summary_report <- list()
+  for(i in 1:length(temp)) {
+    result_temp <- temp[[i]]
+    result_temp <- result_temp[order(result_temp$seqname, result_temp$start),]
+    result_range <- GRanges(result_temp)
+    combined <- reduce(result_range, min.gapwidth=25)
+    foo <- findOverlaps(result_range, combined)
+    combined$support_reads <- table(subjectHits(foo))
+    combined$sv_type <- unique(result_temp$sv_type)
+    print(table(combined$sv_type))
+    summary_report[[i]] <- data.frame(Chr=seqnames(combined), Location=start(combined), Length=width(combined), sv_type=combined$sv_type, supporting_reads=as.numeric(combined$support_reads))
+  }
+  summary_report <- do.call("rbind", summary_report)
+  return(summary_report)
+}
 
 ##################################
 #6/21/23
@@ -932,7 +1143,7 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
     if(is.null(masker_db)) {
 		system(paste("hs-blastn align -query temp.fa -db", blast_ref, "-outfmt 6 -evalue 1e-10 -max_target_seqs 20 -num_threads", node, "> temp.out"))
 	} else {
-		system(paste("hs-blastn align -query temp.fa -db", blast_ref, "-window_masker_db", masker_db, "-max_target_seqs 20 -outfmt 6 -evalue 1e-10 -num_threads", node, "> temp.out"))
+	  system(paste("hs-blastn align -query temp.fa -db", blast_ref, "-window_masker_db", masker_db, "-max_target_seqs 20 -outfmt 6 -evalue 1e-10 -num_threads", node, "> temp.out"))
 	}
 	if(file.size("temp.out")) {
 		aligned <- read.delim("temp.out", header=F)
@@ -943,101 +1154,132 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
 	colnames(aligned) <- c("qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "qlen")
 
 	if(exclude_chrM) {
-      aligned <- aligned[aligned$bitscore>=200&aligned$pident>=95&aligned$sseqid!="chrM",]
-    }
+      aligned <- aligned[aligned$bitscore>=100&aligned$pident>=95&aligned$sseqid!="chrM",]
+	} else {
+	  aligned <- aligned[aligned$bitscore>=100&aligned$pident>=95,]
+  }
     aligned[,c("qstart", "qend")] <- t(apply(aligned[,c("qstart", "qend")], 1, function(X) sort(as.numeric(X), decreasing = F)))
     aligned <- aligned[order(aligned$qseqid, aligned$qstart),]
     aligned_list <- split(aligned, f=aligned$qseqid)
     print("Finished alignment with Blast.")
     #browser()
     temp_result[[streamer_count]] <- mclapply(1:length(aligned_list), function(i) {
-		if(i %% 1000 ==0) {
-			print(i)
-		}
+  		if(i %% 1000 ==0) {
+  			print(i)
+  		}
+  
+  		dum <- aligned_list[[i]]
+  		dum$sstrand <- apply(dum[,c("sstart", "send")], 1, function(X) ifelse(X[1]< X[2], "pos", "neg"))
+  		dum$cov <- (dum$qend - dum$qstart +1)/dum$qlen
+  		
+  		#Need to refine the subregion to make sure there is no redundant alignments
+  		if(nrow(dum)>2) {
+  		  dum_temp <- dum
+  		  dum_temp[,c("qstart", "qend")] <- t(apply(dum_temp[,c("qstart", "qend")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+  		  x <- GRanges(seqnames=unique(dum_temp$qseqid), ranges = IRanges(start=dum_temp$qstart, end=dum_temp$qend))
+  		  y <- reduce(x-round(min_sv_size/2))
+  		  #y <- reduce(x, min.gapwidth=round(min_sv_size/2))
+  		  foo <- as.data.frame(findOverlaps(x,y, minoverlap = min_sv_size/2))
+  		  segmentation <- list()
+  		  for(j in unique(foo$subjectHits)) {
+  		    segmentation_temp <- dum_temp[foo$queryHits[which(foo$subjectHits==j)],]
+  		    #segmentation[[j]] <- segmentation_temp
+  		    segmentation[[j]] <- segmentation_temp[which(segmentation_temp$bitscore==max(segmentation_temp$bitscore)),]
+  		  }
+  		  dum <- do.call("rbind", segmentation)
+  		}
+  	
+  		best <- which(dum$bitscore==max(dum$bitscore))
+  
+      if((max(dum$cov[best])>=0.99 & max(dum$pident[best])>=97) | length(unique(dum$sseqid))>2) {
+        #perfect align or too complicated align
+  		  return(NULL)
+      }
 
-		dum <- aligned_list[[i]]
-		dum$sstrand <- apply(dum[,c("sstart", "send")], 1, function(X) ifelse(X[1]< X[2], "pos", "neg"))
-    dum$cov <- (dum$qend - dum$qstart +1)/dum$qlen
-    best <- which(dum$bitscore==max(dum$bitscore))
-
-    if((max(dum$cov[best])>=0.99 & max(dum$pident[best])>=97) | length(unique(dum$sseqid))>2) {
-      #perfect align or too complicated align
-		  return(NULL)
-    }
-
-    if(length(unique(dum$sseqid))==2) {
-		#browser()
-		#1. Check if one chrom already covers entire read, go to following step for segmentation
-			foo <- split(dum, f=dum$sseqid)
-			each_list <- list()
-			for(z in 1:length(foo)) {
-				each <- array(0, dim=c(unique(foo[[z]]$qlen), nrow(foo[[z]])))
-				for(j in 1:nrow(foo[[z]])) {
-					each[foo[[z]][j, "qstart"]:foo[[z]][j, "qend"],j] <- 1
-				}
-				each_list[[z]] <- each
-			}
-			cov_list <- sapply(each_list, function(each) sum(apply(each, 1, sum)>0)/nrow(each))
-			if(max(cov_list)>=0.99) {
-				#one chrom covers entire read, so just use the chrom for next step and ignore the other chrom
-					dum <- foo[[which(cov_list>= 0.99)]]
-			} else {
-				#Check if fragments on both chrom are contiguous and covers most of the read
-				each_combined <- do.call("cbind", each_list)
-				cov_combined <- sum(apply(each_combined, 1, sum)>0)/nrow(each_combined)
-				if(cov_combined>= 0.99) {
-				    #translocation
-					dum$SV <- "translocation"
-					#print(paste("translocation",ncol(dum)))
-					return(dum)
-				} else {
-					return(NULL)
-				}
-			}
-    }
-    
-    #add in segmenation step to resolve multiple reports involving distant regions
-		dum_temp <- dum
-		dum_temp[,c("sstart", "send")] <- t(apply(dum_temp[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
-        x <- GRanges(seqnames=unique(dum_temp$sseqid), ranges = IRanges(start=dum_temp$sstart, end=dum_temp$send))
-        y <- reduce(x+max_dist)
-        foo <- as.data.frame(findOverlaps(x, y))
-        segmentation <- array(dim=length(unique(foo$subjectHits)))
-        for(j in unique(foo$subjectHits)) {
-          segmentation_temp <- x[foo$queryHits[which(foo$subjectHits==j)]]
-          segmentation[j] <- sum(width(segmentation_temp))
-        }
-
-        idx <- which(segmentation==max(segmentation))
-        dum1 <- dum[foo$queryHits[which(foo$subjectHits==idx)],]
-		
-		#Now checking for SV 
+      if(length(unique(dum$sseqid))==2) {
+  		#browser()
+  		#1. Check if one chrom already covers entire read, go to following step for segmentation
+  			foo <- split(dum, f=dum$sseqid)
+  			each_list <- list()
+  			for(z in 1:length(foo)) {
+  				each <- array(0, dim=c(unique(foo[[z]]$qlen), nrow(foo[[z]])))
+  				for(j in 1:nrow(foo[[z]])) {
+  					each[foo[[z]][j, "qstart"]:foo[[z]][j, "qend"],j] <- 1
+  				}
+  				each_list[[z]] <- each
+  			}
+  			cov_list <- sapply(each_list, function(each) sum(apply(each, 1, sum)>0)/nrow(each))
+  			if(max(cov_list)>=0.99) {
+  				#one chrom covers entire read, so just use the chrom for next step and ignore the other chrom
+  					dum <- foo[[which(cov_list>= 0.99)]]
+  			} else {
+  				#Check if fragments on both chrom are contiguous and covers most of the read
+  				each_combined <- do.call("cbind", each_list)
+  				cov_combined <- sum(apply(each_combined, 1, sum)>0)/nrow(each_combined)
+  				if(cov_combined>= 0.99) {
+  				    #translocation
+  					dum$SV <- "translocation"
+  					#print(paste("translocation",ncol(dum)))
+  					return(dum)
+  				} else {
+  					return(NULL)
+  				}
+  			}
+      }
+      
+      #add in segmentation step to resolve multiple reports involving distant regions
+  		dum_temp <- dum
+  		dum_temp[,c("sstart", "send")] <- t(apply(dum_temp[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+      x <- GRanges(seqnames=unique(dum_temp$sseqid), ranges = IRanges(start=dum_temp$sstart, end=dum_temp$send))
+      y <- reduce(x+max_dist)
+      foo <- as.data.frame(findOverlaps(x, y))
+      segmentation <- array(dim=length(unique(foo$subjectHits)))
+      for(j in unique(foo$subjectHits)) {
+        segmentation_temp <- x[foo$queryHits[which(foo$subjectHits==j)]]
+        segmentation[j] <- sum(width(segmentation_temp))
+      }
+  
+      idx <- which(segmentation==max(segmentation))
+      dum1 <- dum[foo$queryHits[which(foo$subjectHits==idx)],]
+  	
+		  #Now checking for SV 
         if(nrow(dum1)==1) {
           #normal
           return(NULL)
-        } else if  (nrow(dum1)<=3 & length(unique(dum1$sstrand))==2) {
-          temp <- convert_alignment(dum1)
-          a1 <- rowSums(abs(temp)) #reference
-          b1 <- colSums(abs(temp)) #query
+        } else if  (nrow(dum1)>2 &nrow(dum) <=4 & length(unique(dum1$sstrand))==2) {
+          temp <- convert_alignment_new(dum1)
+          a1 <- temp[[1]] #reference
+          b1 <- temp[[2]] #query
           
-          if (sum(b1==0)<=min_sv_size & sum(a1==0)<=min_sv_size & sum(a1>1)<=min_sv_size & sum(b1>1)<=min_sv_size) {
+          if (sum(b1==0)<=min_sv_size & sum(a1==0)<=min_sv_size & sum(b1>1)<=min_sv_size) {
             dum1$SV <- "inversion"
 		        return(dum1)
           }
+        } else if  (nrow(dum1)==2 & length(unique(dum1$sstrand))==2) {
+          temp <- convert_alignment_new(dum1)
+          a1 <- temp[[1]] #reference
+          b1 <- temp[[2]] #query
+          
+          if (sum(b1==0)<=min_sv_size & sum(a1==0)<=min_sv_size & sum(b1>1)<=min_sv_size) {
+            dum1$SV <- "inversion_other"
+            return(dum1)
+          }
         } else if(nrow(dum1)<=3 & length(unique(dum1$sstrand))==1) {
-          temp <- convert_alignment(dum1)
-          a1 <- rowSums(abs(temp)) #reference
-          b1 <- colSums(abs(temp)) #query
-
+          temp <- convert_alignment_new(dum1)
+          a1 <- temp[[1]] #reference
+          b1 <- temp[[2]] #query
+          
           if(sum(a1==0)==0 & sum(b1==0)==0) {
             return(NULL)
           }
 
-          if (sum(a1==0)<=min_sv_size & sum(a1>1)>=min_sv_size &sum(b1>1)<=min_sv_size) {
+          if (sum(a1==0)<=min_sv_size & sum(b1==0)<=min_sv_size & sum(a1>1)>=min_sv_size &sum(b1>1)<=min_sv_size) {
             dum1$SV <- "duplication"
 			      return(dum1)
-          } else if (sum(a1==0)>=min_sv_size & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
-            dum1$SV <- "CSUB"
+          #} 
+          #else if (sum(a1==0)>=min_sv_size & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
+          #  dum1$SV <- "CSUB"
+          #  return(dum1)
           } else if (sum(a1==0)<=min_sv_size & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
             dum1$SV <- "insertion"
 			      return(dum1)
@@ -1050,11 +1292,10 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
           }
 
         } else if(nrow(dum1) >3 & length(unique(dum1$sstrand))==1) {
-          temp <- convert_alignment(dum1)
-          #reference
-          a1 <- rowSums(abs(temp))
-          #query
-          b1 <- colSums(abs(temp))
+          temp <- convert_alignment_new(dum1)
+          a1 <- temp[[1]] #reference
+          b1 <- temp[[2]] #query
+          
           if (sum(b1>1)<=min_sv_size & sum(a1>2)>=min_sv_size & sum(a1==0)<=min_sv_size) {
             dum1$SV <- "duplication"
 			      #print(dum1)
@@ -1072,7 +1313,7 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
     }, mc.cores=node)
 
 	good_num <- sum(sapply(temp_result,function(X) sum(sapply(X, length)!=0)))
-    print(paste("Found", good_num, "SV events so far."))
+    print(paste("Found", good_num, "SV reads so far."))
     gc()
   }
   close(fs)
@@ -1083,5 +1324,362 @@ find_sv_hs_blastn_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50
   a <- split(result, f=result$SV)
   result_list <- lapply(a, function(X) split(X, f=X$qseqid))
   print(sapply(result_list, length))
-return(result_list)
+  saveRDS(result_list, file="sv_all.rds")
+  return(result_list)
 }
+
+
+#Now record the breakpoint at real time
+find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size = 50, max_dist=10000, blast_ref="Z:/genome/SacCer3/SacCer3_blast", masker_db=NULL, block_size=1000, exclude_chrM=T, graph=T, node=8) {
+  #install.packages('rBLAST', repos = 'https://mhahsler.r-universe.dev')
+  library(ShortRead)
+  library(parallel)
+  library(tictoc)
+  #browser()
+  #Sys.setenv(PATH=paste("/opt/hs-blastn/0.0.5/bin/", Sys.getenv("PATH"), sep=":"))
+  tic()
+  fs <- FastqStreamer(FASTQ, n=block_size)
+  aligned_result <- list()
+  count <- 0
+  streamer_count <-  0
+  temp_result <- list()
+  print("Start detection process")
+  while(length(fq <- yield(fs))) {
+    streamer_count <- streamer_count+1
+    print(paste("Imported", streamer_count*block_size, "reads."))
+    ind <- which(is.element(fq@id, candidates)==T)
+    if(length(ind)==0) {
+      next
+    }
+    count <- count+length(ind)
+    print(paste("Processing", length(ind), "candidates..."))
+    a <- DNAStringSet(fq@sread[ind])
+    names(a) <- fq@id[ind]
+    #browser()
+    width <- width(a)
+    names(width) <- names(a)
+    writeXStringSet(a, file="temp.fa")
+    #aligned <- predict(ref, a, BLAST_args = paste("-task megablast -window_masker_db /net/nfs-irwrsrchnas01/labs/xwu/genome/hg38/hg38.fa.counts.obinary -num_threads", node), custom_format = "qseqid qlen qstart qend sseqid sstart send sstrand length pident bitscore")
+    if(is.null(masker_db)) {
+      system(paste("hs-blastn align -query temp.fa -db", blast_ref, "-outfmt 6 -evalue 1e-10 -max_target_seqs 20 -num_threads", node, "> temp.out"), ignore.stderr = T)
+    } else {
+      system(paste("hs-blastn align -query temp.fa -db", blast_ref, "-window_masker_db", masker_db, "-max_target_seqs 20 -outfmt 6 -evalue 1e-10 -num_threads", node, "> temp.out"), ignore.stderr = T)
+    }
+    if(file.size("temp.out")) {
+      aligned <- read.delim("temp.out", header=F)
+    } else {
+      next
+    }
+    aligned$qlen <- width[match(aligned[,1], names(width))]
+    colnames(aligned) <- c("qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "qlen")
+    
+    if(exclude_chrM) {
+      aligned <- aligned[aligned$bitscore>=100&aligned$pident>=95&aligned$sseqid!="chrM",]
+    } else {
+      aligned <- aligned[aligned$bitscore>=100&aligned$pident>=95,]
+    }
+    aligned[,c("qstart", "qend")] <- t(apply(aligned[,c("qstart", "qend")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+    aligned <- aligned[order(aligned$qseqid, aligned$qstart),]
+    aligned_list <- split(aligned, f=aligned$qseqid)
+    print("Finished alignment with Blast.")
+    #browser()
+    temp_result[[streamer_count]] <- mclapply(1:length(aligned_list), function(i) {
+      #if(i %% 1000 ==0) {
+      #  print(i)
+      #}
+      
+      dum <- aligned_list[[i]]
+      dum$sstrand <- apply(dum[,c("sstart", "send")], 1, function(X) ifelse(X[1]< X[2], "pos", "neg"))
+      dum$cov <- (dum$qend - dum$qstart +1)/dum$qlen
+      
+      #Need to refine the subregion to make sure there is no redundant alignments
+      if(nrow(dum)>2) {
+        dum_temp <- dum
+        dum_temp[,c("qstart", "qend")] <- t(apply(dum_temp[,c("qstart", "qend")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+        x <- GRanges(seqnames=unique(dum_temp$qseqid), ranges = IRanges(start=dum_temp$qstart, end=dum_temp$qend))
+        y <- reduce(x-round(min_sv_size/2))
+        #y <- reduce(x, min.gapwidth=round(min_sv_size/2))
+        foo <- as.data.frame(findOverlaps(x,y, minoverlap = min_sv_size/2))
+        segmentation <- list()
+        for(j in unique(foo$subjectHits)) {
+          segmentation_temp <- dum_temp[foo$queryHits[which(foo$subjectHits==j)],]
+          #segmentation[[j]] <- segmentation_temp
+          segmentation[[j]] <- segmentation_temp[which(segmentation_temp$bitscore==max(segmentation_temp$bitscore)),]
+        }
+        dum <- do.call("rbind", segmentation)
+      }
+      
+      best <- which(dum$bitscore==max(dum$bitscore))
+      
+      if((max(dum$cov[best])>=0.99 & max(dum$pident[best])>=97) | length(unique(dum$sseqid))>2) {
+        #perfect align or too complicated align
+        return(NULL)
+      }
+      
+      if(length(unique(dum$sseqid))==2) {
+        #browser()
+        #1. Check if one chrom already covers entire read, go to following step for segmentation
+        foo <- split(dum, f=dum$sseqid)
+        each_list <- list()
+        for(z in 1:length(foo)) {
+          each <- array(0, dim=c(unique(foo[[z]]$qlen), nrow(foo[[z]])))
+          for(j in 1:nrow(foo[[z]])) {
+            each[foo[[z]][j, "qstart"]:foo[[z]][j, "qend"],j] <- 1
+          }
+          each_list[[z]] <- each
+        }
+        cov_list <- sapply(each_list, function(each) sum(apply(each, 1, sum)>0)/nrow(each))
+        if(max(cov_list)>=0.99) {
+          #one chrom covers entire read, so just use the chrom for next step and ignore the other chrom
+          dum <- foo[[which(cov_list>= 0.99)]]
+        } else {
+          #Check if fragments on both chrom are contiguous and covers most of the read
+          each_combined <- do.call("cbind", each_list)
+          cov_combined <- sum(apply(each_combined, 1, sum)>0)/nrow(each_combined)
+          if(cov_combined>= 0.99) {
+            #translocation
+            dum$SV <- "translocation"
+            align_good <- dum
+            dum <- dum[order(dum$sseqid),]
+            count<- count+1
+            if(dum$sstrand[1]=="pos") {
+              start <- dum$send[1]
+            } else {
+              start <- dum$sstart[1]
+            }  
+            
+            if(dum$sstrand[2]=="pos") {
+              end <- dum$sstart[2]
+            } else {
+              end <- dum$sstart[2]
+            }
+            seqname <- paste(unique(dum$sseqid), collapse="-")
+            read <- unique(dum$qseqid)
+            report_good <- c(seqname, start, paste(start, end, sep=":"), read, "translocation")
+            return(list(align_good, report_good))
+          } else {
+            return(NULL)
+          }
+        }
+      }
+      
+      #add in segmentation step to resolve multiple reports involving distant regions
+      dum_temp <- dum
+      dum_temp[,c("sstart", "send")] <- t(apply(dum_temp[,c("sstart", "send")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+      x <- GRanges(seqnames=unique(dum_temp$sseqid), ranges = IRanges(start=dum_temp$sstart, end=dum_temp$send))
+      y <- reduce(x+max_dist)
+      foo <- as.data.frame(findOverlaps(x, y))
+      segmentation <- array(dim=length(unique(foo$subjectHits)))
+      for(j in unique(foo$subjectHits)) {
+        segmentation_temp <- x[foo$queryHits[which(foo$subjectHits==j)]]
+        segmentation[j] <- sum(width(segmentation_temp))
+      }
+      
+      idx <- which(segmentation==max(segmentation))
+      dum1 <- dum[foo$queryHits[which(foo$subjectHits==idx)],]
+      
+      #Now checking for SV 
+      if(nrow(dum1)==1) {
+        #normal
+        return(NULL)
+      #} else if  (nrow(dum1)>2 &nrow(dum) <=4 & length(unique(dum1$sstrand))==2) {
+      } else if  (nrow(dum1)==3 & (sum(dum1$sstrand==c("pos", "neg", "pos"))==3 | sum(dum1$sstrand==c("neg", "pos", "neg"))==3)) {
+        temp <- convert_alignment_new(dum1)
+        a1 <- temp[[1]] #reference
+        b1 <- temp[[2]] #query
+        
+        if (sum(b1==0)<=min_sv_size & sum(a1==0)<=min_sv_size & sum(b1>1)<=min_sv_size) {
+          dum1$SV <- "inversion"
+          align_good <- dum1
+          
+          if(dum1$sstrand[2]=="pos") {
+            start <- dum1$sstart[2]
+            end <- dum1$send[2]
+          } else {
+            end <- dum1$sstart[2]
+            start <- dum1$send[2]
+          }
+          seqname <- unique(dum1$sseqid)
+          read <- unique(dum1$qseqid)
+          report_good <- c(seqname, start, abs(start-end), read, "inversion")
+          
+          return(list(align_good, report_good))
+        }
+      } else if  (nrow(dum1)==2 & length(unique(dum1$sstrand))==2) {
+        temp <- convert_alignment_new(dum1)
+        a1 <- temp[[1]] #reference
+        b1 <- temp[[2]] #query
+        
+        if (sum(b1==0)<=min_sv_size & sum(a1==0)<=min_sv_size & sum(b1>1)<=min_sv_size) {
+          dum1$SV <- "inversion_other"
+          align_good <- dum1
+          
+          if(dum$sstrand[1]=="pos") {
+            start <- dum1$send[1]
+          } else {
+            start <- dum1$sstart[1]
+          }  
+          
+          if(dum1$sstrand[2]=="pos") {
+            end <- dum1$sstart[2]
+          } else {
+            end <- dum1$sstart[2]
+          }
+
+          seqname <- unique(dum1$sseqid)
+          read <- unique(dum1$qseqid)
+          report_good <- c(seqname, start, abs(start-end), read, "inversion_other")
+          #return(NULL)
+          return(list(align_good, report_good))
+        }
+      } else if(nrow(dum1)==2 & length(unique(dum1$sstrand))==1) {
+        temp <- convert_alignment_new(dum1)
+        a1 <- temp[[1]] #reference
+        b1 <- temp[[2]] #query
+        
+        if(sum(a1==0)==0 & sum(b1==0)==0) {
+          return(NULL)
+        }
+        
+        if (sum(a1==0)<=min_sv_size & sum(b1==0)<=min_sv_size & sum(a1>1)>=min_sv_size &sum(b1>1)<=min_sv_size) {
+          dum1$SV <- "duplication"
+          align_good <- dum1
+          foo1 <- range(which(a1>1))
+          start <- min(dum1[,c("sstart", "send")])+foo1[1]
+          end <- min(dum1[,c("sstart", "send")])+foo1[2]
+          seqname <- unique(dum1$sseqid)
+          read <- unique(dum1$qseqid)
+          report_good <- c(seqname, start, abs(start-end), read, "duplication")
+          
+          return(list(align_good, report_good))
+          #} 
+          #else if (sum(a1==0)>=min_sv_size & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
+          #  dum1$SV <- "CSUB"
+          #  return(dum1)
+        } else if (sum(a1==0)<=min_sv_size/2 & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
+          dum1$SV <- "insertion"
+          align_good <- dum1
+          
+          start <- round(mean(as.numeric(dum1$send[1]), as.numeric(dum1$sstart[2])))
+          seqname <- unique(dum1$sseqid)
+          read <- unique(dum1$qseqid)
+          report_good <- c(seqname, start, abs(dum1$qstart[2]-dum1$qend[1]), read, "insertion")
+          return(list(align_good, report_good))
+        } else if(sum(b1==0)<=min_sv_size & sum(b1>1) <=min_sv_size & sum(a1==0)>=min_sv_size & sum(a1>1)<=min_sv_size) {
+          dum1$SV <- "deletion"
+          align_good <- dum1
+          if(unique(dum1$sstrand)=="pos") {
+            start <- dum1$send[1]
+            end <- dum1$sstart[2]
+          } else {
+            end <- dum1$send[1]
+            start <- dum1$sstart[2]
+          }
+          seqname <- unique(dum1$sseqid)
+          read <- unique(dum1$qseqid)
+          report_good <- c(seqname, start, abs(start-end), read, "deletion")
+          return(list(align_good, report_good))
+          return(dum1)
+        } else {
+          #dum1$SV <- "other"
+          return(NULL)
+        }
+        
+      } else if(nrow(dum1) >=3 & length(unique(dum1$sstrand))==1) {
+        temp <- convert_alignment_new(dum1)
+        a1 <- temp[[1]] #reference
+        b1 <- temp[[2]] #query
+        
+        if (sum(b1>1)<=min_sv_size & sum(a1>2)>=min_sv_size & sum(a1==0)<=min_sv_size) {
+          dum1$SV <- "duplication"
+          align_good <- dum1
+          foo1 <- range(which(a1>1))
+          start <- min(dum1[,c("sstart", "send")])+foo1[1]
+          end <- min(dum1[,c("sstart", "send")])+foo1[2]
+          seqname <- unique(dum1$sseqid)
+          read <- unique(dum1$qseqid)
+          report_good <- c(seqname, start, abs(start-end), read, "duplication")
+          
+          return(list(align_good, report_good))
+        } else if (sum(a1==0)<=min_sv_size & sum(b1>=2)>=min_sv_size) {
+          #repeats in reference
+          return(NULL)
+        } else {
+          #dum1$SV <- "other"
+          return(NULL)
+        }
+      }
+      #result <- list(insertion=insertion, deletion=deletion,inversion=inversion, duplication=duplication, tandem=tandem_repeats, translocation=translocation, other=other)
+      #return(dum1)
+    }, mc.cores=node)
+    
+    good_num <- sum(sapply(temp_result,function(X) sum(sapply(X, function(Y) length(Y[[1]]))!=0)))
+    print(paste("Found", good_num, "SV reads so far."))
+    gc()
+  }
+  toc()
+  close(fs)
+  saveRDS(temp_result, file="temp_result.rds")
+  #browser()
+  good <- lapply(temp_result, function(X) X[sapply(X, function(Y) !is.null(Y)&class(Y)!="try-error")])
+  result <- do.call("rbind", lapply(good, function(X) do.call("rbind", sapply(X, function(Y) Y[1]))))
+  a <- split(result, f=result$SV)
+  result_list <- lapply(a, function(X) split(X, f=X$qseqid))
+  print(sapply(result_list, length))
+  #saveRDS(result_list, file="sv_all.rds")
+  report <- do.call("rbind", lapply(good, function(X) do.call("rbind", sapply(X, function(Y) Y[2]))))
+  #write.csv(report, file="sv_report.csv")
+  return(list(result_list, report))
+}
+
+call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 10000, window_masker_db=NULL, block_size=1000, graph=T, node=8, out="SV_result") {
+  library(rtracklayer)
+  library(tictoc)
+  
+  if(is.null(candidates)) {
+    candidates <- get_candidate(BAM=BAM, softclip_length = 50)
+    writeLines(candidates, "candidates.txt")
+  } else {
+    candidates=readLines(candidates)
+  }
+  
+  
+  #start_time <- Sys.time()
+  tic()
+  sv_result <- find_sv_hs_blastn_parallel_v2(FASTQ = fastq,  blast_ref=ref, masker_db=window_masker_db, candidates=candidates,max_dist=max_dist, block_size=block_size, node=node)
+  #end_time <- Sys.time()
+  #print(paste(start_time, end_time))
+  #print(paste("Total run time:", end_time - start_time))
+  toc()
+  
+  system(paste0("mkdir ", out))
+  setwd(out)
+  saveRDS(sv_result, file="sv_all.rds")
+  sv <- sv_result[[1]]
+  for(i in names(sv)) {
+    write.csv(do.call("rbind", sv[[i]]), file=paste0(i, ".csv"))
+  }
+  
+  report <- sv_result[[2]]
+  write.csv(report, "sv_report_all.csv")
+  SV_collapsed <- Collapse_SV_v2(report)
+  write.csv(SV_collapsed, "SV_report_summary.csv")
+  
+  if(graph) {
+    print("Generating graphs...")
+    for(i in names(sv)) {
+      system(paste0("mkdir ", i))
+      setwd(i)
+      if(i=="translocation") {
+        generate_image_translocation(sv[["translocation"]], output=T)
+      } else {
+        generate_image(sv[[i]], output=T)
+      }
+      setwd("../")
+    }
+  }  
+  
+  return(sv_result)
+}
+
+
