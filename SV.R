@@ -48,6 +48,125 @@ get_candidate <- function(reads=NULL, BAM, softclip_length) {
   return(names(read)[bad])
 }
 
+#Now also report the longest indel locations
+get_candidate_v2 <- function(reads=NULL, BAM, softclip_length) {
+  library(ShortRead)
+  if(is.null(reads)){
+    print("Importing bam file...")
+    read <- readGAlignments(BAM, use.names = T)
+    print("Done importing bam.")
+  } else {
+    read <- reads
+  }
+  
+  #Reads with large softclip
+  dum <- read@cigar
+  a <- grep("^[0-9]*S", dum)
+  bad1 <- a[which(sapply(strsplit(dum[a], "S"), function(X) as.integer(X[1]))>=softclip_length)]
+  b <- grep("[0-9]*S$", dum)
+  b1 <- gsub("[0-9]*[IDX=]", "", dum[b])
+  bad2 <- b[which(sapply(strsplit(b1, split="S"), function(X) {
+    temp <- as.integer(X)
+    temp[length(temp)]
+  })>=softclip_length)]
+  
+  #Also include large insertion in the middle
+  c <- grep("I", dum)
+  c1 <- gsub("[0-9]*[SDX=]", "", dum[c])
+  c_bad <- sapply(strsplit(c1, split="I"), function(X) {
+    temp <- as.integer(X)
+    good <- c(FALSE, 0)
+    if(max(temp)>=softclip_length) {
+      good <- c(TRUE, paste0("I", max(temp)))
+    }
+    return(good)
+  })
+  
+  bad3 <- c_bad[2,which(c_bad[1,]==T)]
+  names(bad3) <- c[which(c_bad[1,]==T)]
+    
+  #Also include large deletion in the middle
+  d <- grep("D", dum)
+  d1 <- gsub("[0-9]*[SIX=]", "", dum[d])
+  d_bad <- sapply(strsplit(d1, split="D"), function(X) {
+    temp <- as.integer(X)
+    good <- c(FALSE,0)
+    if(max(temp)>=softclip_length) {
+      good <- c(TRUE, paste0("D", max(temp)))
+    }
+    return(good)
+  })
+  bad4 <- d_bad[2,which(d_bad[1,]==T)]
+  names(bad4) <- d[which(d_bad[1,]==T)]
+  #browser()
+  bad <- unique(c(bad1, bad2, as.integer(names(bad3)), as.integer(names(bad4))))
+  #browser()
+  indels <- c(bad3, bad4)
+  indels_read <- c(names(read)[as.integer(names(bad3))], names(read)[as.integer(names(bad4))])
+  write.csv(cbind(indels_read, indels), file="indels.csv")
+  print(paste("There are", length(bad), "reads with long softclips or large indels."))
+  return(names(read)[bad])
+}
+
+#Now also report the longest indel locations
+get_candidate_v3 <- function(reads=NULL, BAM, softclip_length, cores=8) {
+  library(ShortRead)
+  if(is.null(reads)){
+    print("Importing bam file...")
+    read <- readGAlignments(BAM, use.names = T)
+    print("Done importing bam.")
+  } else {
+    read <- reads
+  }
+  
+  #Reads with large softclip
+  dum <- read@cigar
+  bad1 <- cigarRangesAlongQuerySpace(read@cigar, ops="S")
+  names(bad1) <- names(read)
+  foo <- unlist(bad1)
+  foo1 <- foo[width(foo)>=softclip_length]
+  bad1_good <- unique(names(foo1))
+
+  #Also include large insertion in the middle
+  bad2_r <- cigarRangesAlongReferenceSpace(read@cigar, ops="I", pos = read@start)
+  bad2_q <- cigarRangesAlongQuerySpace(read@cigar, ops="I")
+
+  names(bad2_r) <- names(read)
+  names(bad2_q) <- names(read)
+  foo_r <- unlist(bad2_r)
+  foo_q <- unlist(bad2_q)
+  
+  ind <- which(width(foo_q)>=softclip_length)
+  loc <- start(foo_r)[ind]
+  read_name <- names(foo_q)[ind]
+  len <- width(foo_q)[ind]
+  chr <- as.character(read@seqnames)[match(read_name, names(read))]
+  bad2_result <- cbind(chr, loc, len, read_name, "insertion")
+
+  
+  #Also include large deletion in the middle
+  bad3_r <- cigarRangesAlongReferenceSpace(read@cigar, ops="D", pos = read@start)
+  #bad3_q <- cigarRangesAlongQuerySpace(read@cigar, ops="D")
+
+  names(bad3_r) <- names(read)
+  foo_r <- unlist(bad3_r)
+  
+  ind <- which(width(foo_r)>=softclip_length)
+  loc <- start(foo_r)[ind]
+  read_name <- names(foo_r)[ind]
+  len <- width(foo_r)[ind]
+  chr <- as.character(read@seqnames)[match(read_name, names(read))]
+  bad3_result <- cbind(chr, loc, len, read_name, "deletion")
+  
+
+  bad <- unique(c(bad1_good, bad2_result[,4], bad3_result[,4]))
+  #browser()
+  indels <- rbind(bad2_result, bad3_result)
+  #indels_read <- c(names(read)[as.integer(names(bad3))], names(read)[as.integer(names(bad4))])
+  write.csv(indels, file="indels.csv")
+  print(paste("There are", length(bad), "reads with long softclips or large indels."))
+  return(bad)
+}
 
 
 find_sv_blast <- function(FASTQ, candidates= NULL, min_sv_size = 50, max_dist=10000, blast_ref="Z:/genome/SacCer3/SacCer3_blast", block_size=1000, exclude_chrM=T, graph=T) {
@@ -548,13 +667,14 @@ find_sv_blast_parallel <- function(FASTQ, candidates= NULL, min_sv_size = 50, ma
 
 
 
-generate_image_translocation <- function(aligned_list, output=T) {
+generate_image_translocation <- function(aligned_list, output=T, cores=cores) {
   #library(rBLAST)
   if(length(aligned_list)==0) {
     print("Nothing to plot")
     return(NULL)
   }
-  for(j in 1:length(aligned_list)) {
+  #for(j in 1:length(aligned_list)) {
+  mclapply(1:length(aligned_list), function(j) {
     if(j %% 1000 == 0) {
       print(j)
     }
@@ -595,26 +715,27 @@ generate_image_translocation <- function(aligned_list, output=T) {
     if(output) {
       dev.off()
     }
-  }
+  }, mc.cores=)
 }
 
 
-generate_image <- function(aligned_list, output=T) {
+generate_image <- function(aligned_list, output=T, cores=cores) {
   #library(rBLAST)
   if(length(aligned_list)==0) {
     print("Nothing to plot")
     return(NULL)
   }
   #browser()
-  for(j in 1:length(aligned_list)) {
+  #for(j in 1:length(aligned_list)) {
+  mclapply(1:length(aligned_list), function(j) {
     if(j %% 1000 == 0) {
       print(j)
     }
-
+    
     dum_filtered <- as.data.frame(aligned_list[[j]])
-  	sseqid <- unique(dum_filtered$sseqid)
-  	dum_filtered[,c(3:13)] <- sapply(dum_filtered[,c(3:13)], as.numeric)
-	  #dum_filtered[,c(2,3,4,6,7,9:12)] <- sapply(dum_filtered[,c(2,3,4,6,7,9:12)], as.numeric)
+    sseqid <- unique(dum_filtered$sseqid)
+    dum_filtered[,c(3:13)] <- sapply(dum_filtered[,c(3:13)], as.numeric)
+    #dum_filtered[,c(2,3,4,6,7,9:12)] <- sapply(dum_filtered[,c(2,3,4,6,7,9:12)], as.numeric)
     #if(length(unique(dum_filtered$sseqid))>1) {
     # print("More than one chromosome.")
     #  next
@@ -622,9 +743,9 @@ generate_image <- function(aligned_list, output=T) {
     if(output) {
       png(paste0("Candidate_", j, "_plot.png"))
     }
-
+    
     for(i in 1:nrow(dum_filtered)) {
-	  
+      
       min_X <- min(c(dum_filtered$qstart, dum_filtered$qend))
       max_X <- max(c(dum_filtered$qstart, dum_filtered$qend))
       min_Y <- min(c(dum_filtered$sstart, dum_filtered$send))
@@ -643,7 +764,7 @@ generate_image <- function(aligned_list, output=T) {
     if(output) {
       dev.off()
     }
-  }
+  }, mc.cores=)
 }
 
 convert_alignment <- function(alignment, scale.down=1) {
@@ -1334,10 +1455,14 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
   #install.packages('rBLAST', repos = 'https://mhahsler.r-universe.dev')
   library(ShortRead)
   library(parallel)
-  library(tictoc)
+  #library(tictoc)
   #browser()
   #Sys.setenv(PATH=paste("/opt/hs-blastn/0.0.5/bin/", Sys.getenv("PATH"), sep=":"))
-  tic()
+  #tic()
+  indels <- read.csv("indels.csv")
+  indels <- indels[,-1]
+  #candidates=indels[,4]
+  
   fs <- FastqStreamer(FASTQ, n=block_size)
   aligned_result <- list()
   count <- 0
@@ -1361,7 +1486,7 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
     writeXStringSet(a, file="temp.fa")
     #aligned <- predict(ref, a, BLAST_args = paste("-task megablast -window_masker_db /net/nfs-irwrsrchnas01/labs/xwu/genome/hg38/hg38.fa.counts.obinary -num_threads", node), custom_format = "qseqid qlen qstart qend sseqid sstart send sstrand length pident bitscore")
     if(is.null(masker_db)) {
-      system(paste("hs-blastn align -query temp.fa -db", blast_ref, "-outfmt 6 -evalue 1e-10 -max_target_seqs 20 -num_threads", node, "> temp.out"), ignore.stderr = T)
+      system(paste("hs-blastn align -query temp.fa -db", blast_ref, "-outfmt 6 -evalue 1e-10 -max_target_seqs 20 -num_threads", node, "> temp.out"))
     } else {
       system(paste("hs-blastn align -query temp.fa -db", blast_ref, "-window_masker_db", masker_db, "-max_target_seqs 20 -outfmt 6 -evalue 1e-10 -num_threads", node, "> temp.out"), ignore.stderr = T)
     }
@@ -1480,10 +1605,16 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
       
       #Now checking for SV 
       if(nrow(dum1)==1) {
+        ind <- match(dum1$qseqid, indels[,4])
+        if(!is.na(ind)) {
+          #print("extra")
+          dum1$SV <- indels[ind,5]
+          return(list(dum1, as.character(indels[ind,])))
+        }
         #normal
-        return(NULL)
+        #return(NULL)
       #} else if  (nrow(dum1)>2 &nrow(dum) <=4 & length(unique(dum1$sstrand))==2) {
-      } else if  (nrow(dum1)==3 & (sum(dum1$sstrand==c("pos", "neg", "pos"))==3 | sum(dum1$sstrand==c("neg", "pos", "neg"))==3)) {
+       } else if  (nrow(dum1)==3 & (sum(dum1$sstrand==c("pos", "neg", "pos"))==3 | sum(dum1$sstrand==c("neg", "pos", "neg"))==3)) {
         temp <- convert_alignment_new(dum1)
         a1 <- temp[[1]] #reference
         b1 <- temp[[2]] #query
@@ -1537,7 +1668,7 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
         a1 <- temp[[1]] #reference
         b1 <- temp[[2]] #query
         
-        if(sum(a1==0)==0 & sum(b1==0)==0) {
+        if(sum(a1!=1)<min_sv_size & sum(b1!=1)<min_sv_size) {
           return(NULL)
         }
         
@@ -1617,11 +1748,11 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
     print(paste("Found", good_num, "SV reads so far."))
     gc()
   }
-  toc()
+  #toc()
   close(fs)
   saveRDS(temp_result, file="temp_result.rds")
   #browser()
-  good <- lapply(temp_result, function(X) X[sapply(X, function(Y) !is.null(Y)&class(Y)!="try-error")])
+  good <- lapply(temp_result, function(X) X[sapply(X, function(Y) !is.null(Y)&sum(is.na(Y))==0&class(Y)!="try-error")])
   result <- do.call("rbind", lapply(good, function(X) do.call("rbind", sapply(X, function(Y) Y[1]))))
   a <- split(result, f=result$SV)
   result_list <- lapply(a, function(X) split(X, f=X$qseqid))
@@ -1637,7 +1768,7 @@ call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 100
   library(tictoc)
   
   if(is.null(candidates)) {
-    candidates <- get_candidate(BAM=BAM, softclip_length = 50)
+    candidates <- get_candidate_v3(BAM=BAM, softclip_length = 50, cores=64)
     writeLines(candidates, "candidates.txt")
   } else {
     candidates=readLines(candidates)
@@ -1671,9 +1802,9 @@ call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 100
       system(paste0("mkdir ", i))
       setwd(i)
       if(i=="translocation") {
-        generate_image_translocation(sv[["translocation"]], output=T)
+        generate_image_translocation(sv[["translocation"]], output=T, cores=node)
       } else {
-        generate_image(sv[[i]], output=T)
+        generate_image(sv[[i]], output=T, cores=node)
       }
       setwd("../")
     }
@@ -1683,3 +1814,51 @@ call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 100
 }
 
 
+check_read <- function(fastq, ID, blast_ref) {
+  if(is.null(ID)) {
+    foo <- readFastq(fastq)
+  } else {
+    system(paste("grep -A 3", ID, fastq, "> test.fastq"))
+    foo <- readFastq("test.fastq")
+  }
+  print("found read")
+  a <- foo@sread
+  names(a) <- foo@id[1]
+  #ref <- blast(blast_ref)
+  #aligned <- predict(blast_ref, a, custom_format = "qseqid qlen qstart qend sseqid sstart send sstrand length pident bitscore")
+  system(paste("hs-blastn align -query test.fastq -db", blast_ref, "-window_masker_db", paste0(blast_ref, ".counts.obinary"), "-outfmt 6 -evalue 1e-10 -max_target_seqs 20 -gapopen 3 -gapextend 3 -reward 1 -penalty -5 > temp.out"))
+  aligned <- read.delim("temp.out", header=F)
+  aligned$qlen <- width(a)
+  colnames(aligned) <- c("qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "qlen")
+  aligned <- aligned[aligned$bitscore>=100&aligned$pident>=95,]
+  aligned[,c("qstart", "qend")] <- t(apply(aligned[,c("qstart", "qend")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+  aligned <- aligned[order(aligned$qseqid, aligned$qstart),]
+  
+  dum <- aligned
+  dum$sstrand <- apply(dum[,c("sstart", "send")], 1, function(X) ifelse(X[1]< X[2], "pos", "neg"))
+  dum$cov <- (dum$qend - dum$qstart +1)/dum$qlen
+  print(dum)
+  #Need to refine the subregion to make sure there is no redundant alignments
+  if(nrow(dum)>2) {
+    dum_temp <- dum
+    dum_temp[,c("qstart", "qend")] <- t(apply(dum_temp[,c("qstart", "qend")], 1, function(X) sort(as.numeric(X), decreasing = F)))
+    x <- GRanges(seqnames=unique(dum_temp$qseqid), ranges = IRanges(start=dum_temp$qstart, end=dum_temp$qend))
+    y <- reduce(x-round(min_sv_size/2))
+    #y <- reduce(x, min.gapwidth=round(min_sv_size/2))
+    foo <- as.data.frame(findOverlaps(x,y, minoverlap = min_sv_size/2))
+    segmentation <- list()
+    for(j in unique(foo$subjectHits)) {
+      segmentation_temp <- dum_temp[foo$queryHits[which(foo$subjectHits==j)],]
+      #segmentation[[j]] <- segmentation_temp
+      segmentation[[j]] <- segmentation_temp[which(segmentation_temp$bitscore==max(segmentation_temp$bitscore)),]
+    }
+    dum <- do.call("rbind", segmentation)
+  }
+  print(dum)
+  if(length(unique(dum$sseqid))==1) {
+    generate_image(list(dum), output=F)
+  } else {
+    generate_image_translocation(list(dum), output=F)
+  }
+  return(dum)
+}
