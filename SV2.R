@@ -6,7 +6,7 @@
 #sensitivity in case blast 
 #does not detect it
 ##########################
-get_candidate_v3 <- function(reads=NULL, BAM, softclip_length, cores=8) {
+get_candidate_v3 <- function(reads=NULL, BAM, softclip_length) {
   library(ShortRead)
   if(is.null(reads)){
     print("Importing bam file...")
@@ -360,7 +360,7 @@ Collapse_SV_v2 <- function(result_table) {
 #Using hs-blastn to improve on speed
 #Now record the breakpoint at real time
 ##################################
-find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size = 50, max_dist=10000, blast_ref="Z:/genome/SacCer3/SacCer3_blast", masker_db=NULL, block_size=1000, platform="PacBio CCS", graph=T, node=8) {
+find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size = 30, max_dist=10000, blast_ref="Z:/genome/SacCer3/SacCer3_blast", masker_db=NULL, block_size=1000, platform="PacBio CCS", graph=T, node=8) {
   #install.packages('rBLAST', repos = 'https://mhahsler.r-universe.dev')
   library(ShortRead)
   library(parallel)
@@ -370,6 +370,7 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
   #tic()
   indels <- read.csv("indels.csv")
   indels <- indels[,-1]
+  #colnames(indels) <- ""
   #candidates=indels[,4]
   
   fs <- FastqStreamer(FASTQ, n=block_size)
@@ -397,8 +398,10 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
     writeXStringSet(a, file="temp.fa")
     #aligned <- predict(ref, a, BLAST_args = paste("-task megablast -window_masker_db /net/nfs-irwrsrchnas01/labs/xwu/genome/hg38/hg38.fa.counts.obinary -num_threads", node), custom_format = "qseqid qlen qstart qend sseqid sstart send sstrand length pident bitscore")
     if(is.null(masker_db)) {
+      #this will be too slow
       system(paste("hs-blastn align -query temp.fa -db", blast_ref, "-outfmt 6 -evalue 1e-10 -max_target_seqs 20 -num_threads", node, "> temp.out"))
     } else {
+      #Fastest megablast
       system(paste("hs-blastn align -query temp.fa -db", blast_ref, "-window_masker_db", masker_db, "-max_target_seqs 20 -outfmt 6 -evalue 1e-10 -num_threads", node, "> temp.out"), ignore.stderr = T)
     }
     if(file.size("temp.out")) {
@@ -408,22 +411,19 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
     }
     aligned$qlen <- width[match(aligned[,1], names(width))]
     colnames(aligned) <- c("qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "qlen")
-    
     if(platform=="PacBio CCS") {
-      aligned <- aligned[aligned$bitscore>=100&aligned$pident>=95&aligned$sseqid!="chrM",]
+      #use higher pindet for ccs data, remove chrM by default
+      aligned <- aligned[(aligned$qend-aligned$qstart)>=min_sv_size&aligned$pident>=94&aligned$sseqid!="chrM",]
     } else {
-      aligned <- aligned[aligned$bitscore>=100&aligned$pident>=85&aligned$sseqid!="chrM",]
+      #allow more errors with non-CCS data, e.g. Nanopore or PacBio CLS
+      aligned <- aligned[(aligned$qend-aligned$qstart)>=min_sv_size&aligned$pident>=87&aligned$sseqid!="chrM",]
     }
     aligned[,c("qstart", "qend")] <- t(apply(aligned[,c("qstart", "qend")], 1, function(X) sort(as.numeric(X), decreasing = F)))
     aligned <- aligned[order(aligned$qseqid, aligned$qstart),]
     aligned_list <- split(aligned, f=aligned$qseqid)
     print("Finished alignment with Blast.")
-    #browser()
+
     temp_result[[streamer_count]] <- mclapply(1:length(aligned_list), function(i) {
-      #if(i %% 1000 ==0) {
-      #  print(i)
-      #}
-      
       dum <- aligned_list[[i]]
       dum$sstrand <- apply(dum[,c("sstart", "send")], 1, function(X) ifelse(X[1]< X[2], "pos", "neg"))
       dum$cov <- (dum$qend - dum$qstart +1)/dum$qlen
@@ -434,19 +434,20 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
         dum_temp[,c("qstart", "qend")] <- t(apply(dum_temp[,c("qstart", "qend")], 1, function(X) sort(as.numeric(X), decreasing = F)))
         x <- GRanges(seqnames=unique(dum_temp$qseqid), ranges = IRanges(start=dum_temp$qstart, end=dum_temp$qend))
         y <- reduce(x-round(min_sv_size/2))
-        #y <- reduce(x, min.gapwidth=round(min_sv_size/2))
         foo <- as.data.frame(findOverlaps(x,y, minoverlap = min_sv_size/2))
         segmentation <- list()
         for(j in unique(foo$subjectHits)) {
           segmentation_temp <- dum_temp[foo$queryHits[which(foo$subjectHits==j)],]
-          #segmentation[[j]] <- segmentation_temp
           segmentation[[j]] <- segmentation_temp[which(segmentation_temp$bitscore==max(segmentation_temp$bitscore)),]
         }
         dum <- do.call("rbind", segmentation)
+        #updated segmentation step to remove redundant, not as good
+        #y <- findOverlaps(x,x+min_sv_size/2, type="within") 
+        #a1 <- as.matrix(y)
+        #b1 <- a1[which(a1[,1]!=a1[,2]),]
+        #dum <- x[-unique(b1[,1]),]
       }
-      
       best <- which(dum$bitscore==max(dum$bitscore))
-      
       if((max(dum$cov[best])>=0.99 & max(dum$pident[best])>=97) | length(unique(dum$sseqid))>2) {
         #perfect align or too complicated align
         return(NULL)
@@ -494,7 +495,17 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
             report_good <- c(seqname, start, paste(start, end, sep=":"), read, "translocation")
             return(list(align_good, report_good))
           } else {
-            return(NULL)
+            #return(NULL)
+            ind <- which(indels[,4]==unique(dum1$qseqid))
+            if(length(ind)>0) {
+              dum2 <- list()
+              for(i in 1:length(ind)) {
+                dum3 <- dum1
+                dum3$SV <- indels[ind[i],5]
+                dum2[[i]] <- dum3
+              }
+              return(list(do.call("rbind", dum2), indels[ind,]))
+            }
           }
         }
       }
@@ -516,21 +527,64 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
       
       #Now checking for SV 
       if(nrow(dum1)==1) {
-        ind <- match(dum1$qseqid, indels[,4])
-        if(!is.na(ind)) {
-          #print("extra")
-          dum1$SV <- indels[ind,5]
-          return(list(dum1, as.character(indels[ind,])))
+        #when one size of query not aligned, it is an insertion, although not completed detected.
+        #if((dum1$qlen-dum1$cov*dum1$qlen)>= min_sv_size*10){
+        #  dum1$SV <- "BP_other"
+        #  align_good <- dum1
+        #  if(dum1$qstart<(dum1$qlen-dum1$qend)) {
+        #    start <- as.numeric(dum1$send)
+        #    len <- dum1$qlen-dum1$qend
+        #  } else {
+        #    start <- as.numeric(dum1$sstart)
+        #    len <- dum1$qstart
+        #  }
+        #  seqname <- unique(dum1$sseqid)
+        #  read <- unique(dum1$qseqid)
+        #  report_good <- c(seqname, start, len, read, "BP_other")
+        #  return(list(align_good, report_good))
+        #}
+
+        #ind <- match(dum1$qseqid, indels[,4])
+        #if(!is.na(ind)) {
+        #  dum1$SV <- indels[ind,5]
+        #  return(list(dum1, as.character(indels[ind,])))
+        #}
+        
+        #note that some reads have multiple entries reported from parsing pbmm2
+        ind <- which(indels[,4]==dum1$qseqid)
+        if(length(ind)>0) {
+          dum2 <- list()
+          for(i in 1:length(ind)) {
+            dum3 <- dum1
+            dum3$SV <- indels[ind[i],5]
+            dum2[[i]] <- dum3
+          }
+          return(list(do.call("rbind", dum2), indels[ind,]))
         }
-        #normal
-        #return(NULL)
         #} else if  (nrow(dum1)>2 &nrow(dum) <=4 & length(unique(dum1$sstrand))==2) {
       } else if  (nrow(dum1)==3 & (sum(dum1$sstrand==c("pos", "neg", "pos"))==3 | sum(dum1$sstrand==c("neg", "pos", "neg"))==3)) {
         temp <- convert_alignment_new(dum1)
         a1 <- temp[[1]] #reference
         b1 <- temp[[2]] #query
         
-        if (sum(b1==0)<=min_sv_size & sum(a1==0)<=min_sv_size & sum(b1>1)<=min_sv_size) {
+        if (sum(b1==0)<=min_sv_size & sum(a1==0)<=min_sv_size & sum(b1>1)<=min_sv_size & sum(a1>1)>=min_sv_size) {
+          #print("IVT")
+          dum1$SV <- "IVT"
+          align_good <- dum1
+          
+          if(dum1$sstrand[2]=="pos") {
+            start <- dum1$sstart[2]
+            end <- dum1$send[2]
+          } else {
+            end <- dum1$sstart[2]
+            start <- dum1$send[2]
+          }
+          seqname <- unique(dum1$sseqid)
+          read <- unique(dum1$qseqid)
+          report_good <- c(seqname, start, abs(start-end), read, "IVT")
+          
+          return(list(align_good, report_good))
+        } else {
           dum1$SV <- "inversion"
           align_good <- dum1
           
@@ -579,11 +633,13 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
         a1 <- temp[[1]] #reference
         b1 <- temp[[2]] #query
         
-        if(sum(a1!=1)<min_sv_size & sum(b1!=1)<min_sv_size) {
-          return(NULL)
-        }
+        #if(sum(a1!=1)<min_sv_size & sum(b1!=1)<min_sv_size) {
+        #  return(NULL)
+        #}
         
         if (sum(a1==0)<=min_sv_size & sum(b1==0)<=min_sv_size & sum(a1>1)>=min_sv_size &sum(b1>1)<=min_sv_size) {
+        #  if (sum(a1==0)<=min_sv_size & sum(b1==0)<=min_sv_size & sum(a1>1)>=min_sv_size) {
+            #likely miss very large duplications, due to read length
           dum1$SV <- "duplication"
           align_good <- dum1
           foo1 <- range(which(a1>1))
@@ -594,21 +650,8 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
           report_good <- c(seqname, start, abs(start-end), read, "duplication")
           
           return(list(align_good, report_good))
-        } else if (sum(a1==0)>=min_sv_size & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
-          dum1$SV <- "CSUB"
-          align_good <- dum1
-          if(unique(dum1$sstrand)=="pos") {
-            start <- dum1$send[1]
-            end <- dum1$sstart[2]
-          } else {
-            end <- dum1$send[1]
-            start <- dum1$sstart[2]
-          }
-          seqname <- unique(dum1$sseqid)
-          read <- unique(dum1$qseqid)
-          report_good <- c(seqname, start, abs(start-end), read, "deletion")
-          return(list(align_good, report_good))
-        } else if (sum(a1==0)<=min_sv_size/2 & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
+        } else if (sum(a1==0)<=min_sv_size & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
+        #} else if (sum(a1==0)<sum(b1==0) & sum(b1==0)>=min_sv_size) {
           dum1$SV <- "insertion"
           align_good <- dum1
           
@@ -618,6 +661,7 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
           report_good <- c(seqname, start, abs(dum1$qstart[2]-dum1$qend[1]), read, "insertion")
           return(list(align_good, report_good))
         } else if(sum(b1==0)<=min_sv_size & sum(b1>1) <=min_sv_size & sum(a1==0)>=min_sv_size & sum(a1>1)<=min_sv_size) {
+        #} else if(sum(b1==0)<sum(a1==0) & sum(a1==0)>=min_sv_size) {
           dum1$SV <- "deletion"
           align_good <- dum1
           if(unique(dum1$sstrand)=="pos") {
@@ -631,9 +675,34 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
           read <- unique(dum1$qseqid)
           report_good <- c(seqname, start, abs(start-end), read, "deletion")
           return(list(align_good, report_good))
+        } else if (sum(a1==0)>=min_sv_size & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
+          dum1$SV <- "CSUB"
+          align_good <- dum1
+          if(unique(dum1$sstrand)=="pos") {
+            start <- dum1$send[1]
+            end <- dum1$sstart[2]
+          } else {
+            end <- dum1$send[1]
+            start <- dum1$sstart[2]
+          }
+          seqname <- unique(dum1$sseqid)
+          read <- unique(dum1$qseqid)
+          report_good <- c(seqname, start, abs(start-end), read, "CSUB")
+          return(list(align_good, report_good))
         } else {
-          #dum1$SV <- "other"
-          return(NULL)
+          #dum1$SV <- "BP_other"
+          #return(NULL)
+          ind <- which(indels[,4]==unique(dum1$qseqid))
+          if(length(ind)>0) {
+            dum2 <- list()
+            for(i in 1:length(ind)) {
+              dum3 <- dum1
+              dum3$SV <- indels[ind[i],5]
+              dum2[[i]] <- dum3
+            }
+            #print(indels[good,])
+            return(list(do.call("rbind", dum2), indels[ind,]))
+          }
         }
         
       } else if(nrow(dum1) >=3 & length(unique(dum1$sstrand))==1) {
@@ -641,7 +710,7 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
         a1 <- temp[[1]] #reference
         b1 <- temp[[2]] #query
         
-        if (sum(b1>1)<=min_sv_size & sum(a1>2)>=min_sv_size & sum(a1==0)<=min_sv_size) {
+        if (sum(b1==0)<=min_sv_size & sum(a1>1)>=min_sv_size & sum(a1==0)<=min_sv_size) {
           dum1$SV <- "duplication"
           align_good <- dum1
           foo1 <- range(which(a1>1))
@@ -652,12 +721,49 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
           report_good <- c(seqname, start, abs(start-end), read, "duplication")
           
           return(list(align_good, report_good))
-        } else if (sum(a1==0)<=min_sv_size & sum(b1>=2)>=min_sv_size) {
+        } else if (sum(b1==0)<=min_sv_size & sum(a1==0)>=min_sv_size) {
+          dum1$SV <- "deletion"
+          align_good <- dum1
+          if(unique(dum1$sstrand)=="pos") {
+            start <- dum1$send[1]
+            end <- dum1$sstart[2]
+          } else {
+            end <- dum1$send[1]
+            start <- dum1$sstart[2]
+          }
+          seqname <- unique(dum1$sseqid)
+          read <- unique(dum1$qseqid)
+          report_good <- c(seqname, start, abs(start-end), read, "deletion")
+          return(list(align_good, report_good))
+        } 
+        #else if (sum(a1==0)<=min_sv_size & sum(b1>=2)>=min_sv_size) {
           #repeats in reference
-          return(NULL)
-        } else {
-          #dum1$SV <- "other"
-          return(NULL)
+        #  return(NULL)
+        #} 
+      else {
+          ind <- which(indels[,4]==unique(dum1$qseqid))
+          if(length(ind)>0) {
+            dum2 <- list()
+            for(i in 1:length(ind)) {
+              dum3 <- dum1
+              dum3$SV <- indels[ind[i],5]
+              dum2[[i]] <- dum3
+            }
+            #print(indels[good,])
+            return(list(do.call("rbind", dum2), indels[ind,]))
+          }
+        }
+      } else {
+        ind <- which(indels[,4]==unique(dum1$qseqid))
+        if(length(ind)>0) {
+          dum2 <- list()
+          for(i in 1:length(ind)) {
+            dum3 <- dum1
+            dum3$SV <- indels[ind[i],5]
+            dum2[[i]] <- dum3
+          }
+          #print(indels[good,])
+          return(list(do.call("rbind", dum2), indels[ind,]))
         }
       }
       #result <- list(insertion=insertion, deletion=deletion,inversion=inversion, duplication=duplication, tandem=tandem_repeats, translocation=translocation, other=other)
@@ -678,12 +784,18 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
   result_list <- lapply(a, function(X) split(X, f=X$qseqid))
   print(sapply(result_list, length))
   #saveRDS(result_list, file="sv_all.rds")
-  report <- do.call("rbind", lapply(good, function(X) do.call("rbind", sapply(X, function(Y) Y[2]))))
+  #report <- do.call("rbind", lapply(good, function(X) do.call("rbind", sapply(X, function(Y) Y[2]))))
+  report <- lapply(good, function(X) do.call("rbind", sapply(X, function(Y) Y[2])))
+  report_filtered <- report[!sapply(report, is.null)]
+  for(z in 1:length(report_filtered)){
+    colnames(report_filtered[[z]]) <- colnames(indels)
+  }
+  report <- do.call("rbind", report_filtered)
   #write.csv(report, file="sv_report.csv")
-  return(list(result_list, report))
+  return(list(result_list, report_filtered))
 }
 
-find_sv_hs_blastn_parallel_v3 <- function(FASTQ, candidates= NULL, min_sv_size = 50, max_dist=10000, blast_ref="Z:/genome/SacCer3/SacCer3_blast", masker_db=NULL, block_size=1000, platform="PacBio CCS", graph=T, node=8) {
+find_sv_hs_blastn_parallel_v3 <- function(FASTQ, candidates= NULL, min_sv_size = 30, max_dist=10000, blast_ref="Z:/genome/SacCer3/SacCer3_blast", masker_db=NULL, block_size=1000, platform="PacBio CCS", graph=T, node=8) {
   #install.packages('rBLAST', repos = 'https://mhahsler.r-universe.dev')
   library(ShortRead)
   library(parallel)
@@ -729,9 +841,9 @@ find_sv_hs_blastn_parallel_v3 <- function(FASTQ, candidates= NULL, min_sv_size =
     colnames(aligned) <- c("qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "qlen")
     
     if(platform=="PacBio CCS") {
-      aligned <- aligned[aligned$bitscore>=100&aligned$pident>=95&aligned$sseqid!="chrM",]
+      aligned <- aligned[aligned$bitscore>=2*min_sv_size&aligned$pident>=94&aligned$sseqid!="chrM",]
     } else {
-      aligned <- aligned[aligned$bitscore>=100&aligned$pident>=87&aligned$sseqid!="chrM",]
+      aligned <- aligned[aligned$bitscore>=2*min_sv_size&aligned$pident>=87&aligned$sseqid!="chrM",]
     }
     aligned[,c("qstart", "qend")] <- t(apply(aligned[,c("qstart", "qend")], 1, function(X) sort(as.numeric(X), decreasing = F)))
     aligned <- aligned[order(aligned$qseqid, aligned$qstart),]
@@ -755,6 +867,7 @@ find_sv_hs_blastn_parallel_v3 <- function(FASTQ, candidates= NULL, min_sv_size =
         y <- reduce(x-round(min_sv_size/2))
         #y <- reduce(x, min.gapwidth=round(min_sv_size/2))
         foo <- as.data.frame(findOverlaps(x,y, minoverlap = min_sv_size/2))
+        #foo <- as.data.frame(findOverlaps(x,y))
         segmentation <- list()
         for(j in unique(foo$subjectHits)) {
           segmentation_temp <- dum_temp[foo$queryHits[which(foo$subjectHits==j)],]
@@ -925,7 +1038,7 @@ find_sv_hs_blastn_parallel_v3 <- function(FASTQ, candidates= NULL, min_sv_size =
           }
           seqname <- unique(dum1$sseqid)
           read <- unique(dum1$qseqid)
-          report_good <- c(seqname, start, abs(start-end), read, "deletion")
+          report_good <- c(seqname, start, abs(start-end), read, "CSUB")
           return(list(align_good, report_good))
         } else if (sum(a1==0)<=min_sv_size/2 & sum(a1>1) <= min_sv_size & sum(b1==0)>=min_sv_size&sum(b1>1)<=min_sv_size) {
           dum1$SV <- "insertion"
@@ -994,12 +1107,12 @@ find_sv_hs_blastn_parallel_v3 <- function(FASTQ, candidates= NULL, min_sv_size =
 #This is the main pipeline to for 
 #long read SV detection
 #################################
-call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 10000, window_masker_db=NULL, block_size=1000, platform="PacBio CCS", graph=T, node=8, out="SV_result") {
+call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 10000, min_sv_length=30, window_masker_db=NULL, block_size=1000, platform="PacBio CCS", graph=T, node=8, out="SV_result") {
   library(rtracklayer)
   library(tictoc)
   
   if(is.null(candidates)) {
-    candidates <- get_candidate_v3(BAM=BAM, softclip_length = 50)
+    candidates <- get_candidate_v3(BAM=BAM, softclip_length = min_sv_length)
     writeLines(candidates, "candidates.txt")
   } else {
     candidates=readLines(candidates)
@@ -1008,7 +1121,7 @@ call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 100
   
   #start_time <- Sys.time()
   tic()
-  sv_result <- find_sv_hs_blastn_parallel_v2(FASTQ = fastq,  blast_ref=ref, masker_db=window_masker_db, candidates=candidates,max_dist=max_dist, block_size=block_size, platform=platform, node=node)
+  sv_result <- find_sv_hs_blastn_parallel_v2(FASTQ = fastq,  blast_ref=ref, masker_db=window_masker_db, candidates=candidates,max_dist=max_dist, min_sv_size=min_sv_length, block_size=block_size, platform=platform, node=node)
   #end_time <- Sys.time()
   #print(paste(start_time, end_time))
   #print(paste("Total run time:", end_time - start_time))
@@ -1046,7 +1159,7 @@ call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 100
 
 
 
-call_SV_pacbio_chunk <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 10000, window_masker_db=NULL, block_size=10000, platform="PacBio CCS", graph=T, node=8, out="SV_result") {
+call_SV_pacbio_chunk <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 10000, min_sv_length=30, window_masker_db=NULL, block_size=10000, platform="PacBio CCS", graph=T, node=8, out="SV_result") {
   library(rtracklayer)
   library(Rsamtools)
   library(tictoc)
@@ -1070,12 +1183,13 @@ call_SV_pacbio_chunk <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist
       #browser()
       total_alignment <- total_alignment+length(reads$qname)
       print(paste("Imported", total_alignment, "alignments."))
-      candidates_list[[count]] <- get_candidate_v5(read =reads, softclip_length = 50, chunk=block_size)
+      candidates_list[[count]] <- get_candidate_v5(read =reads, softclip_length = 30, chunk=block_size)
       sv_result_list[[count]] <- find_sv_hs_blastn_parallel_v3(FASTQ = sequences,  
                                                                blast_ref=ref, 
                                                                masker_db=window_masker_db, 
                                                                candidates=candidates_list[[count]], 
                                                                max_dist=max_dist, 
+                                                               min_sv_size=min_sv_length,
                                                                block_size=block_size, 
                                                                platform=platform, 
                                                                node=node)
@@ -1147,12 +1261,12 @@ call_SV_pacbio_chunk <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist
 
 
 ############################
-#It is a help function to check 
+#It is a helper function to check 
 #any given read 
 #for its alignment and graph 
 #generation
 ############################
-check_read <- function(fastq, ID, blast_ref) {
+check_read <- function(fastq, ID, blast_ref, min_sv_size=50) {
   if(is.null(ID)) {
     foo <- readFastq(fastq)
   } else {
@@ -1168,7 +1282,8 @@ check_read <- function(fastq, ID, blast_ref) {
   aligned <- read.delim("temp.out", header=F)
   aligned$qlen <- width(a)
   colnames(aligned) <- c("qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "qlen")
-  aligned <- aligned[aligned$bitscore>=100&aligned$pident>=95,]
+  print(aligned)
+  aligned <- aligned[(aligned$qend-aligned$qstart)>=50&aligned$pident>=94,]
   aligned[,c("qstart", "qend")] <- t(apply(aligned[,c("qstart", "qend")], 1, function(X) sort(as.numeric(X), decreasing = F)))
   aligned <- aligned[order(aligned$qseqid, aligned$qstart),]
   
@@ -1176,27 +1291,64 @@ check_read <- function(fastq, ID, blast_ref) {
   dum$sstrand <- apply(dum[,c("sstart", "send")], 1, function(X) ifelse(X[1]< X[2], "pos", "neg"))
   dum$cov <- (dum$qend - dum$qstart +1)/dum$qlen
   print(dum)
+  #generate_image(list(dum), output=T)
   #Need to refine the subregion to make sure there is no redundant alignments
   if(nrow(dum)>2) {
     dum_temp <- dum
     dum_temp[,c("qstart", "qend")] <- t(apply(dum_temp[,c("qstart", "qend")], 1, function(X) sort(as.numeric(X), decreasing = F)))
     x <- GRanges(seqnames=unique(dum_temp$qseqid), ranges = IRanges(start=dum_temp$qstart, end=dum_temp$qend))
     y <- reduce(x-round(min_sv_size/2))
-    #y <- reduce(x, min.gapwidth=round(min_sv_size/2))
+    browser()
     foo <- as.data.frame(findOverlaps(x,y, minoverlap = min_sv_size/2))
     segmentation <- list()
     for(j in unique(foo$subjectHits)) {
       segmentation_temp <- dum_temp[foo$queryHits[which(foo$subjectHits==j)],]
-      #segmentation[[j]] <- segmentation_temp
       segmentation[[j]] <- segmentation_temp[which(segmentation_temp$bitscore==max(segmentation_temp$bitscore)),]
     }
-    dum <- do.call("rbind", segmentation)
+    dum1 <- do.call("rbind", segmentation)
   }
-  print(dum)
-  if(length(unique(dum$sseqid))==1) {
-    generate_image(list(dum), output=F)
+  print(dum1)
+  if(length(unique(dum1$sseqid))==1) {
+    generate_image(list(dum1), output=T)
   } else {
-    generate_image_translocation(list(dum), output=F)
+    generate_image_translocation(list(dum1), output=T)
   }
-  return(dum)
+  return(dum1)
+}
+
+
+eval_sim <- function(truth, result, gap=500) {
+  colnames(truth)[1:2] <- c("seqname", "start")
+  truth[,1] <- paste0("chr", truth[,1])
+  truth$SVLENGTH <- gsub("x", "*",truth$SVLENGTH)
+  for(i in 1:nrow(truth)) {
+    truth$SVLENGTH[i] <- eval(parse(text=truth$SVLENGTH[i]))
+  }
+
+  truth$end <- truth$start+as.numeric(as.character(truth$SVLENGTH))
+  truth_range <- GRanges(truth)
+  
+  colnames(result)[2:3] <- c("seqname", "start")
+  result$end <- result$start+result$Length
+  result_range <- GRanges(result)
+  
+  overlaps <- array(dim=c(length(unique(truth$TYPE)), length(unique(result$sv_type))))
+  missed <- list()
+  for(i in 1:length(unique(truth$TYPE))) {
+    for(j in 1:length(unique(result$sv_type))) {
+      #print(paste(i,j))
+      dum <- findOverlaps(result_range[result_range$sv_type==unique(result$sv_type)[j]], 
+                          truth_range[truth_range$TYPE==unique(truth$TYPE)[i]], maxgap = gap)
+      overlaps[i,j] <- length(unique(as.matrix(dum)[,2]))
+      if(i==4) {
+        #missed[[j]] <- result_range[result_range$sv_type==unique(result$sv_type)[j]][unique(as.matrix(dum)[,1])]
+        missed[[j]] <- truth_range[truth_range$TYPE==unique(truth$TYPE)[i]][unique(as.matrix(dum)[,2])]
+      }
+       
+    }
+  }
+  colnames(overlaps) <- unique(result$sv_type)
+  row.names(overlaps) <- unique(truth$TYPE)
+  print(overlaps)
+  return(missed)
 }
