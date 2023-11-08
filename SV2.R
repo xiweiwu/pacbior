@@ -376,6 +376,7 @@ find_sv_hs_blastn_parallel_v2 <- function(FASTQ, candidates= NULL, min_sv_size =
   #tic()
   indels <- read.csv("indels.csv")
   indels <- indels[,-1]
+  colnames(indels)<- NULL
   #colnames(indels) <- ""
   #candidates=indels[,4]
   
@@ -1283,11 +1284,6 @@ find_sv_hs_blastn_parallel_v4 <- function(FASTQ, candidates= NULL, min_sv_size =
           segmentation[[j]] <- segmentation_temp[which(segmentation_temp$bitscore==max(segmentation_temp$bitscore))[1],]
         }
         dum <- do.call("rbind", segmentation)
-        #updated segmentation step to remove redundant, not as good
-        #y <- findOverlaps(x,x+min_sv_size/2, type="within") 
-        #a1 <- as.matrix(y)
-        #b1 <- a1[which(a1[,1]!=a1[,2]),]
-        #dum <- x[-unique(b1[,1]),]
       }
       best <- which(dum$bitscore==max(dum$bitscore))[1]
       if((max(dum$cov[best])>=0.99 & max(dum$pident[best])>=97) | length(unique(dum$sseqid))>2) {
@@ -1531,15 +1527,21 @@ find_sv_hs_blastn_parallel_v4 <- function(FASTQ, candidates= NULL, min_sv_size =
   result_list <- lapply(a, function(X) split(X, f=X$qseqid))
   print(sapply(result_list, length))
   #saveRDS(result_list, file="sv_all.rds")
-  #report <- do.call("rbind", lapply(good, function(X) do.call("rbind", sapply(X, function(Y) Y[2]))))
-  report <- lapply(good, function(X) t(sapply(X, function(Y) as.data.frame(Y[[2]]))))
-  report_filtered <- report[!sapply(report, is.null)]
-  for(z in 1:length(report_filtered)){
-    colnames(report_filtered[[z]]) <- colnames(indels)
-  }
-  report <- do.call("rbind", report_filtered)
+
+  good1 <-  sapply(good, function(X) lapply(X, function(Y) {
+    colnames(Y[[2]])<-c("chr", "loc", "len", "read_name", "type")
+    return(Y)
+  }))
+  
+  report <- do.call("rbind", lapply(good1, function(X) do.call("rbind", lapply(X, function(Y) Y[[2]]))))
+  #report <- lapply(good1, function(X) sapply(X, function(Y) as.data.frame(Y[[2]]))))
+  #report_filtered <- report[!sapply(report, is.null)]
+  #for(z in 1:length(report_filtered)){
+  #  colnames(report_filtered[[z]]) <- colnames(indels)
+  #}
+  #report <- do.call("rbind", report_filtered)
   #write.csv(report, file="sv_report.csv")
-  return(list(result_list, report_filtered))
+  return(list(result_list, report))
 }
 
 
@@ -1576,8 +1578,9 @@ call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 100
     write.csv(do.call("rbind", sv[[i]]), file=paste0(i, ".csv"))
   }
   if(is.list(sv_result[[2]])) {
-    dum <- lapply(sv_result[[2]], function(X) apply(X, 1, function(Y) do.call("cbind", Y)))
-    report <- do.call("rbind", lapply(dum, function(X) do.call("rbind", X)))
+    #dum <- lapply(sv_result[[2]], function(X) apply(X, 1, function(Y) do.call("cbind", Y)))
+    #report <- do.call("rbind", lapply(dum, function(X) do.call("rbind", X)))
+    report <- do.call("rbind", sv_result[[2]])
   } else {
     report <- sv_result[[2]]
   }
@@ -1772,30 +1775,33 @@ eval_sim <- function(truth, result, gap=500) {
     truth$SVLENGTH[i] <- eval(parse(text=truth$SVLENGTH[i]))
   }
 
-  truth$end <- truth$start+as.numeric(as.character(truth$SVLENGTH))
+  #browser()
+  truth$end <- ifelse(truth$TYPE!="INS", 
+    truth$start+as.numeric(as.character(truth$SVLENGTH)),
+    truth$start
+  )
+  
   truth_range <- GRanges(truth)
   
   colnames(result)[2:3] <- c("seqname", "start")
-  result$end <- result$start+result$Length
+  result$end <- ifelse(result$sv_type!="insertion",
+    result$start+result$Length,
+    result$start
+  )
+  
   result_range <- GRanges(result)
   
   overlaps <- array(dim=c(length(unique(truth$TYPE)), length(unique(result$sv_type))))
-  missed <- list()
   for(i in 1:length(unique(truth$TYPE))) {
     for(j in 1:length(unique(result$sv_type))) {
       #print(paste(i,j))
       dum <- findOverlaps(result_range[result_range$sv_type==unique(result$sv_type)[j]], 
-                          truth_range[truth_range$TYPE==unique(truth$TYPE)[i]], maxgap = gap)
+                          truth_range[truth_range$TYPE==unique(truth$TYPE)[i]], maxgap = gap, type="equal")
       overlaps[i,j] <- length(unique(as.matrix(dum)[,2]))
-      if(i==4) {
-        #missed[[j]] <- result_range[result_range$sv_type==unique(result$sv_type)[j]][unique(as.matrix(dum)[,1])]
-        missed[[j]] <- truth_range[truth_range$TYPE==unique(truth$TYPE)[i]][unique(as.matrix(dum)[,2])]
-      }
-       
     }
   }
   colnames(overlaps) <- unique(result$sv_type)
   row.names(overlaps) <- unique(truth$TYPE)
   print(overlaps)
-  return(missed)
+  return(overlaps)
 }
