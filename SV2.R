@@ -1577,13 +1577,14 @@ call_SV_pacbio <- function(BAM, fastq, candidates=NULL, ref=NULL, max_dist = 100
   for(i in names(sv)) {
     write.csv(do.call("rbind", sv[[i]]), file=paste0(i, ".csv"))
   }
-  if(is.list(sv_result[[2]])) {
+  
+  #if(is.list(sv_result[[2]])) {
     #dum <- lapply(sv_result[[2]], function(X) apply(X, 1, function(Y) do.call("cbind", Y)))
     #report <- do.call("rbind", lapply(dum, function(X) do.call("rbind", X)))
-    report <- do.call("rbind", sv_result[[2]])
-  } else {
+  #  report <- do.call("rbind", sv_result[[2]])
+  #} else {
     report <- sv_result[[2]]
-  }
+  #}
   
   write.csv(report, "sv_report_all.csv")
   SV_collapsed <- Collapse_SV_v2(report)
